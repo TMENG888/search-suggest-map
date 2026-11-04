@@ -1,0 +1,20 @@
+{
+  "name": "search-suggest-map",
+  "version": "2.0.0",
+  "private": true,
+  "description": "搜索联想词递归采集工作台：抖音、小红书、断点续跑与交互式思维导图",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node server.mjs",
+    "cli": "node collect.mjs",
+    "test": "node --test test.mjs tests/*.test.mjs",
+    "test:ui": "node tests/ui-check.mjs"
+  },
+  "dependencies": {
+    "playwright": "^1.62.1",
+    "fflate": "^0.8.2"
+  }
+}

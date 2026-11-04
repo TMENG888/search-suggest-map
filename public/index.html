@@ -1,0 +1,357 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>SearchSuggestMap · 搜索联想词工作台</title>
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/style.css" />
+    <script src="/app.js" type="module"></script>
+  </head>
+  <body>
+    <header class="topbar">
+      <a class="brand" href="/" aria-label="SearchSuggestMap 首页"
+        ><img src="/favicon.svg" width="34" height="34" alt="" /><span
+          >SearchSuggestMap<small>搜索联想词工作台</small></span
+        ></a
+      >
+      <div class="top-actions">
+        <span id="connection" class="connection"><i></i>连接中</span
+        ><button id="import-btn" class="quiet">导入断点 / 结果</button
+        ><button id="help-btn" class="quiet icon-btn" aria-label="使用说明">
+          ?
+        </button>
+      </div>
+    </header>
+    <div id="session-bar" class="session-bar" hidden>
+      <span id="session-text"></span
+      ><button id="close-session" class="button small">
+        完成并关闭平台浏览器
+      </button>
+    </div>
+    <main class="workspace">
+      <aside class="sidebar">
+        <section class="setup">
+          <div class="section-title">
+            <h1>从一个词开始</h1>
+            <span class="tag">新建采集</span>
+          </div>
+          <p class="intro">沿着平台搜索联想，展开你的关键词地图。</p>
+          <form id="task-form">
+            <fieldset>
+              <legend>采集平台</legend>
+              <div class="platforms">
+                <label class="platform"
+                  ><input
+                    type="radio"
+                    name="platform"
+                    value="douyin"
+                    checked
+                  /><span class="platform-logo dy">♪</span
+                  ><span>抖音<small>已完成实采验证</small></span></label
+                >
+                <label class="platform"
+                  ><input
+                    type="radio"
+                    name="platform"
+                    value="xiaohongshu"
+                  /><span class="platform-logo xhs">红</span
+                  ><span>小红书<small>适配待线上验收</small></span></label
+                >
+                <label class="both-platforms"
+                  ><input type="radio" name="platform" value="both" />
+                  两个平台分别采集</label
+                >
+              </div>
+            </fieldset>
+            <label class="field-label" for="seeds"
+              >起始词 <span>多个词请换行</span></label
+            >
+            <textarea
+              id="seeds"
+              name="seeds"
+              rows="3"
+              maxlength="6000"
+              placeholder="例如：考研&#10;每行一个，最多30个"
+              required
+            ></textarea>
+            <div class="field-row">
+              <div>
+                <label class="field-label" for="depth">递归层数</label>
+                <div class="stepper">
+                  <button
+                    type="button"
+                    id="depth-less"
+                    aria-label="减少递归层数"
+                  >
+                    −</button
+                  ><input
+                    id="depth"
+                    name="depth"
+                    type="number"
+                    min="1"
+                    max="10"
+                    value="3"
+                    required
+                  /><button
+                    type="button"
+                    id="depth-more"
+                    aria-label="增加递归层数"
+                  >
+                    ＋
+                  </button>
+                </div>
+              </div>
+              <div>
+                <label class="field-label" for="delay">查询间隔</label
+                ><select id="delay" name="delay">
+                  <option value="5000">5 秒 · 推荐</option>
+                  <option value="8000">8 秒</option>
+                  <option value="12000">12 秒</option>
+                  <option value="3000">3 秒</option>
+                </select>
+              </div>
+            </div>
+            <p id="depth-hint" class="hint">起始词为第0层，采集到第3层。</p>
+            <details class="advanced">
+              <summary>更多设置</summary>
+              <label class="field-label" for="max-queries">本次查询上限</label
+              ><input
+                id="max-queries"
+                type="number"
+                min="0"
+                max="100000"
+                value="0"
+              />
+              <p class="hint">0表示不限。达到上限后暂停，可继续采集。</p>
+            </details>
+            <button
+              type="submit"
+              id="start-btn"
+              class="button primary start-button"
+            >
+              <span>开始采集</span><span aria-hidden="true">↗</span>
+            </button>
+          </form>
+          <button id="open-browser" class="text-button">
+            先打开平台浏览器 / 登录
+          </button>
+          <p class="hint platform-hint">
+            普通登录提示自动关闭；验证码需在浏览器手动完成。
+          </p>
+        </section>
+        <section class="history">
+          <div class="section-title">
+            <h2>采集记录</h2>
+            <span id="history-count" class="muted">0</span>
+          </div>
+          <div id="history-list">
+            <p class="empty-history">你的采集任务会保存在这里。</p>
+          </div>
+        </section>
+        <footer class="sidebar-footer">
+          <span>本机运行 · 无模型调用费用</span
+          ><button id="paths-btn" class="text-button">查看保存位置</button>
+        </footer>
+      </aside>
+      <section class="main-panel">
+        <div class="canvas-header">
+          <div>
+            <div class="task-heading">
+              <h2 id="task-title">关键词地图</h2>
+              <span id="task-status" class="status neutral">等待开始</span>
+            </div>
+            <p id="task-subtitle">输入起始词，让搜索联想逐层生长。</p>
+          </div>
+          <div class="task-actions">
+            <button id="resume-btn" class="button" hidden>继续采集</button
+            ><button id="pause-btn" class="button" hidden>暂停采集</button
+            ><a id="zip-btn" class="button primary" hidden>下载结果包</a>
+          </div>
+        </div>
+        <div id="manual-banner" class="manual-banner" hidden>
+          <div>
+            <strong id="manual-title">需要手动完成验证</strong>
+            <p id="manual-message"></p>
+          </div>
+          <button id="continue-btn" class="button primary">已处理，继续</button>
+        </div>
+        <div id="notice" class="notice" hidden></div>
+        <div class="summary-strip">
+          <div><span>去重关键词</span><strong id="stat-words">—</strong></div>
+          <div><span>关联关系</span><strong id="stat-edges">—</strong></div>
+          <div><span>完成查询</span><strong id="stat-done">—</strong></div>
+          <div><span>待查词</span><strong id="stat-pending">—</strong></div>
+          <div class="depth-summary" id="depth-summary">
+            每个分支都可追溯到原始返回词
+          </div>
+        </div>
+        <nav class="view-nav" aria-label="结果视图">
+          <div role="tablist">
+            <button
+              id="map-tab"
+              role="tab"
+              aria-selected="true"
+              aria-controls="map-view"
+              data-view="map"
+              class="tab active"
+            >
+              思维导图</button
+            ><button
+              id="words-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="words-view"
+              data-view="words"
+              class="tab"
+            >
+              关键词表</button
+            ><button
+              id="files-tab"
+              role="tab"
+              aria-selected="false"
+              aria-controls="files-view"
+              data-view="files"
+              class="tab"
+            >
+              导出文件
+            </button>
+          </div>
+          <label class="map-search"
+            ><span aria-hidden="true">⌕</span
+            ><input
+              id="search"
+              placeholder="查找关键词"
+              aria-label="查找关键词"
+            /><kbd>Enter</kbd></label
+          >
+        </nav>
+        <div class="view-content">
+          <div
+            id="map-view"
+            class="map-view"
+            role="tabpanel"
+            aria-labelledby="map-tab"
+          >
+            <svg id="map" role="img" aria-label="搜索联想词思维导图">
+              <g id="map-layer"></g>
+            </svg>
+            <div id="empty-map" class="empty-map">
+              <div class="empty-branches" aria-hidden="true">
+                <span>起始词</span><i></i>
+                <div><b>一级联想</b><b>二级联想</b><b>三级联想</b></div>
+              </div>
+              <h3>把一个词，展开成一张地图。</h3>
+              <p>
+                输入你想探索的关键词。每一条分支，<br />都来自平台实际返回的搜索建议。
+              </p>
+              <div class="empty-features">
+                <span>逐层遍历</span><span>自动去重</span><span>随时续跑</span>
+              </div>
+            </div>
+            <div class="map-toolbar">
+              <button id="zoom-in" aria-label="放大">＋</button
+              ><button id="zoom-out" aria-label="缩小">−</button><span></span
+              ><button id="fit-map">适应画布</button
+              ><button id="expand-map">展开全部</button
+              ><button id="collapse-map">折叠分支</button>
+            </div>
+            <div class="map-caption">
+              <span class="legend-dot"></span
+              ><span id="map-caption"
+                >拖动画布移动，滚轮缩放，点击节点查看来源关系</span
+              >
+            </div>
+          </div>
+          <div
+            id="words-view"
+            class="words-view"
+            role="tabpanel"
+            aria-labelledby="words-tab"
+            hidden
+          >
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>关键词</th>
+                    <th>平台</th>
+                    <th>层数</th>
+                    <th>首次父词</th>
+                    <th>查询状态</th>
+                  </tr>
+                </thead>
+                <tbody id="words-body"></tbody>
+              </table>
+            </div>
+            <div class="table-footer">
+              <span id="table-count"></span
+              ><button id="more-words" class="quiet" hidden>再显示200条</button>
+            </div>
+          </div>
+          <div
+            id="files-view"
+            class="files-view"
+            role="tabpanel"
+            aria-labelledby="files-tab"
+            hidden
+          >
+            <h3>让结果继续被使用</h3>
+            <p class="muted">
+              导图、词表和原始回执一并保留。中途暂停也可以导出。
+            </p>
+            <div id="file-list" class="file-list"></div>
+            <p class="hint">
+              平台返回的联想词不代表搜索量，也不等于全平台所有长尾词。
+            </p>
+          </div>
+        </div>
+      </section>
+      <aside class="inspector">
+        <section class="detail-section">
+          <h2>分支详情</h2>
+          <div id="node-details" class="node-details">
+            <div class="detail-placeholder">
+              <span aria-hidden="true">⌁</span>
+              <p>选择地图中的词，查看它从哪里来、还能延伸到哪里。</p>
+            </div>
+          </div>
+        </section>
+        <section class="activity">
+          <div class="section-title">
+            <h2>运行动态</h2>
+            <span id="activity-status" class="muted">未运行</span>
+          </div>
+          <ol id="activity-list">
+            <li class="activity-empty">创建任务后，查询进度会显示在这里。</li>
+          </ol>
+        </section>
+        <div class="inspector-note">
+          <strong>保留真实的平台关系</strong>
+          <p>重复词只查询一次。跨分支关联仍会保存，点击节点可查看全部关系。</p>
+        </div>
+      </aside>
+    </main>
+    <input
+      type="file"
+      id="import-file"
+      accept=".json,application/json"
+      hidden
+    />
+    <dialog id="info-dialog">
+      <div class="dialog-heading">
+        <h2 id="dialog-title">使用说明</h2>
+        <button
+          id="close-dialog"
+          class="quiet icon-btn"
+          aria-label="关闭对话框"
+        >
+          ×
+        </button>
+      </div>
+      <div id="dialog-body"></div>
+      <button id="dialog-done" class="button primary">知道了</button>
+    </dialog>
+    <div id="toast" class="toast" role="status" hidden></div>
+  </body>
+</html>

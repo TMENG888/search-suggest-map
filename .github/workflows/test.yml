@@ -1,0 +1,25 @@
+name: Tests
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - name: Unit and integration tests
+        run: npm test
+        env:
+          SSM_TEST_DIR: ${{ runner.temp }}/search-suggest-map-tests
+      - name: GUI end-to-end checks
+        run: npm run test:ui
+        env:
+          SSM_TEST_DIR: ${{ runner.temp }}/search-suggest-map-ui
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: gui-checks
+          path: ${{ runner.temp }}/search-suggest-map-ui/screenshots

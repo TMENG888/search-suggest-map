@@ -1,0 +1,656 @@
+import fs from "node:fs/promises";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import {
+  createState,
+  crawl,
+  exportAll,
+  save,
+  stats,
+  idFor,
+  normalize,
+  now,
+} from "./core.mjs";
+import { mindmapHTML } from "./mindmap-template.mjs";
+import { BrowserProvider } from "./browser.mjs";
+import { auditState } from "./audit.mjs";
+
+export const EXPORTS = new Set([
+  "mindmap.html",
+  "mindmap.mm",
+  "mindmap.md",
+  "keywords.csv",
+  "relations.csv",
+  "results.json",
+  "checkpoint.json",
+  "完整性核验.json",
+]);
+const idleStatuses = new Set(["ready", "paused", "error"]);
+function invalid(message) {
+  throw Object.assign(new Error(message), { statusCode: 400 });
+}
+export function validateOptions(raw = {}) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw))
+    invalid("任务配置应为一个对象。");
+  if (Array.isArray(raw.seeds) && raw.seeds.some((s) => typeof s !== "string"))
+    invalid("起始词必须是文本。");
+  const seeds = [],
+    seenSeeds = new Set();
+  for (const value of Array.isArray(raw.seeds)
+    ? raw.seeds
+    : String(raw.seeds || "").split(/\r?\n/)) {
+    const seed = normalize(value),
+      key = seed.toLocaleLowerCase();
+    if (seed && !seenSeeds.has(key)) {
+      seeds.push(seed);
+      seenSeeds.add(key);
+    }
+  }
+  if (!seeds.length || seeds.length > 30 || seeds.some((s) => s.length > 200))
+    invalid("请输入1至30个起始词，每词不超过200字。");
+  const platform = raw.platform || "douyin";
+  if (!["douyin", "xiaohongshu", "both"].includes(platform))
+    invalid("平台参数无效。");
+  const depth = Number(raw.depth ?? 3),
+    delayMs = Number(raw.delayMs ?? 5000),
+    maxQueries = Number(raw.maxQueries ?? 0);
+  if (!Number.isInteger(depth) || depth < 1 || depth > 10)
+    invalid("递归层数应为1至10。");
+  if (!Number.isInteger(delayMs) || delayMs < 1500 || delayMs > 60000)
+    invalid("查询间隔应为1500至60000毫秒。");
+  if (!Number.isInteger(maxQueries) || maxQueries < 0 || maxQueries > 100000)
+    invalid("查询上限应为0至100000，0表示不限。");
+  return { seeds, platform, depth, delayMs, maxQueries };
+}
+export function validateCheckpoint(s) {
+  if (
+    !s ||
+    s.version !== 1 ||
+    !s.config ||
+    !Array.isArray(s.nodes) ||
+    !Array.isArray(s.edges) ||
+    !Array.isArray(s.observations)
+  )
+    invalid("不是受支持的checkpoint.json或results.json。");
+  if (
+    !Array.isArray(s.config.seeds) ||
+    !s.config.seeds.length ||
+    s.config.seeds.some((s) => typeof s !== "string" || normalize(s) !== s) ||
+    new Set(s.config.seeds.map((s) => s.toLocaleLowerCase())).size !==
+      s.config.seeds.length
+  )
+    invalid("检查点起始词无效。");
+  if (
+    !Array.isArray(s.config.platforms) ||
+    !s.config.platforms.length ||
+    new Set(s.config.platforms).size !== s.config.platforms.length ||
+    s.config.platforms.some((p) => !["douyin", "xiaohongshu"].includes(p))
+  )
+    invalid("检查点的平台无效。");
+  validateOptions({
+    ...s.config,
+    platform: s.config.platforms.length === 2 ? "both" : s.config.platforms[0],
+  });
+  if (
+    s.nodes.length > 100000 ||
+    s.edges.length > 1000000 ||
+    s.observations.length > 100000
+  )
+    invalid("检查点过大。");
+  const ids = new Set();
+  for (const n of s.nodes) {
+    if (
+      typeof n.term !== "string" ||
+      !normalize(n.term) ||
+      n.term.length > 200 ||
+      !s.config.platforms.includes(n.platform) ||
+      n.id !== idFor(n.platform, n.term) ||
+      ids.has(n.id) ||
+      !Number.isInteger(n.depth) ||
+      n.depth < 0 ||
+      n.depth > s.config.depth ||
+      !["pending", "querying", "done", "depth_boundary"].includes(n.status)
+    )
+      invalid("检查点包含非法节点。");
+    if (n.depth === s.config.depth && n.status !== "depth_boundary")
+      invalid("检查点的深度边界状态无效。");
+    if (n.depth < s.config.depth && n.status === "depth_boundary")
+      invalid("检查点存在未完成的内部节点。");
+    ids.add(n.id);
+  }
+  if (!s.nodes.length) invalid("检查点没有关键词。");
+  const roots = s.nodes.filter((n) => n.depth === 0);
+  if (
+    roots.length !== s.config.seeds.length * s.config.platforms.length ||
+    roots.some((n) => n.parent || !s.config.seeds.includes(n.term))
+  )
+    invalid("起始词与检查点不一致。");
+  for (const n of s.nodes)
+    if (n.depth > 0 && !ids.has(n.parent)) invalid("检查点缺少父词。");
+  const by = new Map(s.nodes.map((n) => [n.id, n]));
+  const edgeSet = new Set();
+  for (const e of s.edges) {
+    const from = by.get(e.from),
+      to = by.get(e.to),
+      key = e.from + "\0" + e.to;
+    if (
+      !from ||
+      !to ||
+      from.platform !== to.platform ||
+      from.depth >= s.config.depth ||
+      to.depth > from.depth + 1 ||
+      edgeSet.has(key) ||
+      !Number.isInteger(e.rank) ||
+      e.rank < 1
+    )
+      invalid("检查点的关系无效。");
+    edgeSet.add(key);
+  }
+  for (const n of s.nodes)
+    if (
+      n.parent &&
+      (!edgeSet.has(n.parent + "\0" + n.id) ||
+        by.get(n.parent).depth !== n.depth - 1)
+    )
+      invalid("检查点的树形层数不一致。");
+  const queried = new Set();
+  for (const o of s.observations) {
+    const n = by.get(o.nodeId);
+    if (
+      !n ||
+      n.status !== "done" ||
+      n.term !== o.query ||
+      n.platform !== o.platform ||
+      queried.has(n.id) ||
+      !Array.isArray(o.suggestions) ||
+      o.suggestions.some((t) => typeof t !== "string") ||
+      !["visible_search_dropdown", "browser_autocomplete_response"].includes(
+        o.source,
+      )
+    )
+      invalid("检查点查询回执无效，不能混入非实采数据。");
+    queried.add(n.id);
+  }
+  if (s.nodes.some((n) => n.status === "done" && !queried.has(n.id)))
+    invalid("已完成节点缺少采集回执。");
+  // Validate observation relations even on a partially completed task.
+  for (const o of s.observations)
+    for (const term of o.suggestions) {
+      const normalized = normalize(term);
+      if (!normalized || normalized.length > 200) continue;
+      const to = idFor(o.platform, normalized);
+      if (to !== o.nodeId && !edgeSet.has(o.nodeId + "\0" + to))
+        invalid("检查点遗漏原始联想关系。");
+    }
+  return structuredClone(s);
+}
+
+export class JobManager extends EventEmitter {
+  constructor({
+    dataDir,
+    workDir,
+    providerFactory = (opts) => new BrowserProvider(opts),
+  }) {
+    super();
+    this.dataDir = dataDir;
+    this.workDir = workDir;
+    this.providerFactory = providerFactory;
+    this.jobs = new Map();
+    this.active = null;
+    this.session = null;
+    this.closing = false;
+  }
+  async init() {
+    await fs.mkdir(this.dataDir, { recursive: true });
+    await fs.mkdir(this.workDir, { recursive: true });
+    for (const name of await fs.readdir(this.dataDir)) {
+      if (!/^[0-9a-f-]{36}$/.test(name)) continue;
+      try {
+        const dir = path.join(this.dataDir, name),
+          meta = JSON.parse(
+            await fs.readFile(path.join(dir, "task.json"), "utf8"),
+          );
+        if (meta.id !== name) continue;
+        const state = validateCheckpoint(
+          JSON.parse(
+            await fs.readFile(path.join(dir, "checkpoint.json"), "utf8"),
+          ),
+        );
+        const lockFile = path.join(dir, "run.lock");
+        try {
+          const lock = JSON.parse(await fs.readFile(lockFile, "utf8"));
+          let alive = false;
+          try {
+            process.kill(lock.pid, 0);
+            alive = true;
+          } catch (e) {
+            if (e.code !== "ESRCH") alive = true;
+          }
+          if (alive) continue;
+          await fs.unlink(lockFile);
+        } catch (e) {
+          if (e.code !== "ENOENT") throw e;
+        }
+        for (const n of state.nodes)
+          if (n.status === "querying") n.status = "pending";
+        if (!["complete", "paused", "ready", "error"].includes(meta.status)) {
+          meta.status = "paused";
+          meta.message = "上次服务已停止，可从断点继续。";
+          state.status = "paused";
+          state.stopReason = meta.message;
+        }
+        const job = {
+          meta,
+          state,
+          dir,
+          logs: [],
+          provider: null,
+          gate: null,
+          stop: false,
+        };
+        this.jobs.set(name, job);
+        await this.persist(job);
+      } catch (error) {
+        this.emit("warning", {
+          message: "跳过损坏或仍被占用的任务：" + name + " " + error.message,
+        });
+      }
+    }
+  }
+  snapshot(job, { graph = false } = {}) {
+    return {
+      ...job.meta,
+      ...stats(job.state),
+      byDepth: Array.from(
+        { length: job.state.config.depth + 1 },
+        (_, d) => job.state.nodes.filter((n) => n.depth === d).length,
+      ),
+      current:
+        job.state.nodes.find((n) => n.status === "querying")?.term || null,
+      logs: job.logs.slice(-100),
+      ...(graph
+        ? {
+            nodes: job.state.nodes.map(
+              ({ id, platform, term, depth, parent, status }) => ({
+                id,
+                platform,
+                term,
+                depth,
+                parent,
+                status,
+              }),
+            ),
+            edges: job.state.edges,
+          }
+        : {}),
+      files: job.meta.updated
+        ? [
+            "mindmap.html",
+            "mindmap.mm",
+            "mindmap.md",
+            "keywords.csv",
+            "relations.csv",
+            "results.json",
+            "checkpoint.json",
+            ...(job.meta.audit ? ["完整性核验.json"] : []),
+          ]
+        : [],
+    };
+  }
+  list() {
+    return [...this.jobs.values()]
+      .sort((a, b) => b.meta.created.localeCompare(a.meta.created))
+      .map((j) => this.snapshot(j));
+  }
+  get(id) {
+    const j = this.jobs.get(id);
+    if (!j) throw Object.assign(new Error("任务不存在。"), { statusCode: 404 });
+    return j;
+  }
+  async persist(j) {
+    j.meta.updated = now();
+    await save(path.join(j.dir, "task.json"), j.meta);
+    await save(path.join(j.dir, "checkpoint.json"), j.state);
+  }
+  notify(j, message) {
+    if (message) {
+      j.logs.push({ at: now(), message });
+      if (j.logs.length > 300) j.logs.shift();
+    }
+    this.emit("update", {
+      id: j.meta.id,
+      status: j.meta.status,
+      ...stats(j.state),
+      message: j.meta.message,
+    });
+  }
+  async create(raw) {
+    const options = validateOptions(raw),
+      id = randomUUID(),
+      dir = path.join(this.dataDir, id);
+    const state = createState({
+      seeds: options.seeds,
+      platforms:
+        options.platform === "both"
+          ? ["douyin", "xiaohongshu"]
+          : [options.platform],
+      depth: options.depth,
+    });
+    const meta = {
+      id,
+      created: now(),
+      status: "ready",
+      message: "准备就绪",
+      options,
+      outputDir: dir,
+    };
+    const j = {
+      meta,
+      state,
+      dir,
+      logs: [],
+      provider: null,
+      gate: null,
+      stop: false,
+    };
+    this.jobs.set(id, j);
+    try {
+      await this.persist(j);
+      await exportAll(state, dir, mindmapHTML);
+    } catch (e) {
+      this.jobs.delete(id);
+      throw e;
+    }
+    this.notify(j, "已创建任务");
+    return this.snapshot(j, { graph: true });
+  }
+  async import(raw) {
+    const state = validateCheckpoint(raw),
+      options = {
+        seeds: state.config.seeds,
+        platform:
+          state.config.platforms.length === 2
+            ? "both"
+            : state.config.platforms[0],
+        depth: state.config.depth,
+        delayMs: 5000,
+        maxQueries: 0,
+      };
+    let audit = null;
+    if (state.status === "complete") audit = auditState(state);
+    for (const n of state.nodes)
+      if (n.status === "querying") n.status = "pending";
+    if (!audit) {
+      state.status = "paused";
+      state.stopReason = "导入断点，可继续采集";
+    }
+    const id = randomUUID(),
+      dir = path.join(this.dataDir, id),
+      meta = {
+        id,
+        created: now(),
+        status: audit ? "complete" : "paused",
+        message: audit ? "已导入，完整性检查通过" : "已导入断点",
+        options,
+        outputDir: dir,
+        audit,
+      };
+    const j = {
+      meta,
+      state,
+      dir,
+      logs: [],
+      provider: null,
+      gate: null,
+      stop: false,
+    };
+    this.jobs.set(id, j);
+    try {
+      await this.persist(j);
+      await exportAll(state, dir, mindmapHTML);
+      if (audit) await save(path.join(dir, "完整性核验.json"), audit);
+    } catch (e) {
+      this.jobs.delete(id);
+      throw e;
+    }
+    this.notify(j, "已导入实采结果");
+    return this.snapshot(j, { graph: true });
+  }
+  reserve(id) {
+    if (this.closing)
+      throw Object.assign(new Error("服务正在退出。"), { statusCode: 409 });
+    if (this.active || this.session)
+      throw Object.assign(
+        new Error(
+          "已有采集任务或平台浏览器正在使用。请先暂停任务或关闭平台会话。",
+        ),
+        { statusCode: 409 },
+      );
+    this.active = id;
+  }
+  start(id) {
+    const j = this.get(id);
+    if (!idleStatuses.has(j.meta.status))
+      throw Object.assign(new Error("当前任务不能启动。"), { statusCode: 409 });
+    this.reserve(id);
+    j.stop = false;
+    j.meta.status = "running";
+    j.meta.message = "正在打开平台浏览器";
+    this.notify(j);
+    j.promise = this.run(j);
+    return this.snapshot(j);
+  }
+  async run(j) {
+    let lock;
+    try {
+      lock = await fs.open(path.join(j.dir, "run.lock"), "wx");
+      await lock.writeFile(
+        JSON.stringify({ pid: process.pid, started: now() }),
+      );
+      const workDir = path.join(this.workDir, "tasks", j.meta.id);
+      await fs.mkdir(workDir, { recursive: true });
+      j.provider = this.providerFactory({
+        workDir,
+        profileDir: path.join(this.workDir, "profiles"),
+        channel: "msedge",
+        headless: false,
+        delayMs: j.meta.options.delayMs,
+        timeoutMs: 12000,
+      });
+      await this.persist(j);
+      let calls = 0;
+      while (!j.stop) {
+        j.meta.status = "running";
+        j.meta.message = "正在查询搜索联想词";
+        this.notify(j);
+        const before = stats(j.state).completedQueries;
+        const remaining = j.meta.options.maxQueries
+          ? j.meta.options.maxQueries - calls
+          : 0;
+        await crawl(j.state, j.provider, {
+          checkpoint: path.join(j.dir, "checkpoint.json"),
+          maxQueries: remaining,
+          stopping: () => j.stop,
+          onProgress: async (node) => {
+            j.meta.message = "已采集：" + node.term;
+            await this.persist(j);
+            await exportAll(j.state, j.dir, mindmapHTML);
+            this.notify(j, "完成查询：" + node.term);
+          },
+        });
+        calls += stats(j.state).completedQueries - before;
+        if (j.state.status === "complete") {
+          j.meta.audit = auditState(j.state);
+          await save(path.join(j.dir, "完整性核验.json"), j.meta.audit);
+          j.meta.status = "complete";
+          j.meta.message = "指定深度遍历完成，完整性检查通过";
+          break;
+        }
+        if (j.stop) break;
+        const reason = j.state.stopReason || "采集已暂停";
+        if (j.meta.options.maxQueries && calls >= j.meta.options.maxQueries) {
+          j.meta.status = "paused";
+          j.meta.message = reason;
+          break;
+        }
+        if (
+          /验证|人工登录|登录弹窗|人工关闭|平台限制|限流429|明确要求登录/.test(
+            reason,
+          )
+        ) {
+          j.meta.status = /验证/.test(reason)
+            ? "awaiting_verification"
+            : "awaiting_browser";
+          j.meta.message = /登录弹窗|人工登录|明确要求登录/.test(reason)
+            ? "登录提示仍挡住搜索框。请在平台窗口关闭提示，或按平台要求登录"
+            : reason;
+          // Keep exactly this browser context alive. No automated CAPTCHA attempt,
+          // page reload loop, profile switching or retries without a human action.
+          const wait = new Promise((resolve) => {
+            j.gate = resolve;
+          });
+          await this.persist(j);
+          await exportAll(j.state, j.dir, mindmapHTML);
+          this.notify(j, "请在浏览器处理平台提示，完成后点击「已处理，继续」");
+          const proceed = await wait;
+          j.gate = null;
+          if (!proceed || j.stop) break;
+        } else {
+          j.meta.status = "paused";
+          j.meta.message = reason;
+          break;
+        }
+      }
+      if (j.stop) {
+        j.meta.status = "paused";
+        j.meta.message = "已暂停，进度已保存";
+        j.state.status = "paused";
+        j.state.stopReason = "用户暂停";
+      }
+    } catch (error) {
+      j.meta.status = "error";
+      j.meta.message =
+        error.code === "EEXIST"
+          ? "任务被其他程序占用，请先关闭原任务。"
+          : String(error.message).slice(0, 1200);
+      j.state.status = "paused";
+      j.state.stopReason = j.meta.message;
+      this.notify(j, j.meta.message);
+    } finally {
+      try {
+        await j.provider?.close();
+      } catch {}
+      j.provider = null;
+      j.gate = null;
+      try {
+        await this.persist(j);
+        await exportAll(j.state, j.dir, mindmapHTML);
+      } catch (e) {
+        j.meta.status = "error";
+        j.meta.message = "保存结果失败：" + e.message;
+      }
+      if (lock) {
+        await lock.close();
+        await fs.unlink(path.join(j.dir, "run.lock")).catch(() => {});
+      }
+      if (this.active === j.meta.id) this.active = null;
+      this.notify(j);
+    }
+  }
+  pause(id) {
+    const j = this.get(id);
+    if (this.active !== id)
+      throw Object.assign(new Error("该任务当前没有运行。"), {
+        statusCode: 409,
+      });
+    j.stop = true;
+    j.meta.status = "pausing";
+    j.meta.message = "正在保存，当前查询结束后暂停";
+    j.gate?.(false);
+    this.notify(j);
+    return this.snapshot(j);
+  }
+  continue(id) {
+    const j = this.get(id);
+    if (
+      !j.gate ||
+      !["awaiting_verification", "awaiting_browser"].includes(j.meta.status)
+    )
+      throw Object.assign(new Error("当前没有等待人工处理的任务。"), {
+        statusCode: 409,
+      });
+    j.meta.status = "running";
+    j.meta.message = "已收到确认，继续原浏览器会话";
+    const resolve = j.gate;
+    j.gate = null;
+    resolve(true);
+    this.notify(j);
+    return this.snapshot(j);
+  }
+  async openSession(platform) {
+    if (!["douyin", "xiaohongshu"].includes(platform))
+      invalid("请选择一个平台。");
+    this.reserve("browser-session");
+    this.active = null;
+    const provider = this.providerFactory({
+      workDir: path.join(this.workDir, "login"),
+      profileDir: path.join(this.workDir, "profiles"),
+      channel: "msedge",
+      headless: false,
+      delayMs: 5000,
+      timeoutMs: 12000,
+      manualLogin: true,
+    });
+    this.session = {
+      platform,
+      provider,
+      message: "请在浏览器完成登录或查看平台提示",
+      opening: true,
+    };
+    this.emit("session");
+    try {
+      await provider.open(platform);
+    } catch (e) {
+      if (this.session) this.session.message = e.message;
+    } finally {
+      if (this.session) this.session.opening = false;
+      this.emit("session");
+    }
+    return this.sessionInfo();
+  }
+  sessionInfo() {
+    return this.session
+      ? {
+          platform: this.session.platform,
+          message: this.session.message,
+          opening: this.session.opening,
+        }
+      : null;
+  }
+  async closeSession() {
+    if (!this.session) return;
+    if (this.session.opening)
+      throw Object.assign(new Error("浏览器仍在打开，请稍候。"), {
+        statusCode: 409,
+      });
+    await this.session.provider.close();
+    this.session = null;
+    this.emit("session");
+  }
+  async shutdown() {
+    this.closing = true;
+    for (const j of this.jobs.values())
+      if (this.active === j.meta.id) {
+        j.stop = true;
+        j.gate?.(false);
+      }
+    await Promise.allSettled(
+      [...this.jobs.values()].map((j) => j.promise).filter(Boolean),
+    );
+    if (this.session) {
+      await this.session.provider.close();
+      this.session = null;
+    }
+  }
+}

@@ -1,0 +1,16 @@
+node_modules/
+data/
+outputs/
+runtime/
+profiles/
+diagnostics/
+downloads/
+test-results/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+run.lock
+.DS_Store
+Thumbs.db
