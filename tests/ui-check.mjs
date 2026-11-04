@@ -85,6 +85,31 @@ try {
   );
   const finishedBefore = successes.length;
   assert(finishedBefore >= 2 && finishedBefore < 31);
+  assert.equal(await page.locator('#max-queries').count(), 0);
+  await page.getByRole('button', {name:'编辑任务 界面回归样本', exact:true}).click();
+  await page.locator('#edit-dialog').waitFor({state:'visible'});
+  assert.equal(await page.locator('#edit-seeds').isDisabled(),true);
+  await page.locator('#edit-delay').fill('8');
+  await page.locator('#cancel-edit').click();
+  assert.equal(manager.list()[0].options.delayMs,5000);
+  await page.locator('#edit-btn').click();
+  await page.locator('#edit-delay').fill('3');
+  await page.screenshot({path:path.join(shots,'edit-desktop.png'),fullPage:true});
+  await page.setViewportSize({width:390,height:844});
+  assert(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth));
+  const box = await page.locator('#edit-dialog').boundingBox();
+  assert(box.x>=0 && box.x+box.width<=390);
+  await page.screenshot({path:path.join(shots,'edit-mobile.png'),fullPage:true});
+  await page.setViewportSize({width:1500,height:1000});
+  await page.locator('#save-edit').click();
+  await page.locator('#edit-dialog').waitFor({state:'hidden'});
+  assert.equal(manager.list()[0].options.delayMs,3000);
+  assert.equal(successes.length,finishedBefore);
+  await page.reload();
+  await page.waitForSelector('.connection.online');
+  await page.locator('#edit-btn').click();
+  assert.equal(await page.locator('#edit-delay').inputValue(),'3');
+  await page.locator('#cancel-edit').click();
   await page.locator("#resume-btn").click();
   await page.waitForFunction(
     () => document.querySelector("#task-status").textContent === "已完成",
@@ -197,6 +222,9 @@ try {
     offlineProvider: true,
     captchaManualContinue: true,
     pauseResume: true,
+    editPausePreservesProgress: true,
+    editCancelAndReload: true,
+    noQueryCountLimit: true,
     successfulQueries: successes.length,
     duplicateSuccessfulQueries: 0,
     downloadZip: true,

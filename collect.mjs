@@ -21,7 +21,7 @@ node collect.mjs export --resume "E:/Codex/outputs/.../checkpoint.json"
 
 --seed 可重复使用；--seed-file 每行一词，UTF-8。
 --depth 3：起始词第0层，采集到第3层，只查询第0—2层。
---max-queries 5：本次最多查询5个词，保存为暂停；0表示不限。
+无查询次数限制；按指定关键词层数遍历全部可达分支。
 --delay-ms 3000：两次查询至少间隔毫秒数，默认3000，最小1500。
 --timeout-ms 12000：每词下拉结果等待时间，最小4000。
 --output 路径：本次输出目录；新任务必须使用新目录。
@@ -43,7 +43,6 @@ const { values, positionals } = parseArgs({
     output: { type: "string" },
     "work-dir": { type: "string" },
     "profile-dir": { type: "string" },
-    "max-queries": { type: "string" },
     "delay-ms": { type: "string" },
     "timeout-ms": { type: "string" },
     channel: { type: "string" },
@@ -221,15 +220,13 @@ async function main() {
         headless: !!provider.options.headless,
         delayMs: provider.options.delayMs,
         timeoutMs: provider.options.timeoutMs,
-        maxQueries: numberOption("max-queries", 0, 0),
       });
       console.log("输出目录：" + output);
       console.log(
-        "仅采集真实搜索联想；串行查询，指定深度：" + state.config.depth,
+        "仅采集真实搜索联想；跨平台并发、单平台依次查询，指定深度：" + state.config.depth,
       );
       await crawl(state, provider, {
         checkpoint,
-        maxQueries: numberOption("max-queries", 0, 0),
         stopping: () => stop,
         onProgress: (node, s) =>
           console.log(

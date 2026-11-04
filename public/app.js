@@ -265,17 +265,23 @@ function render() {
         "aria-label",
         "继续任务 " + item.options.seeds.join("、"),
       );
-      resume.disabled = busy || item.deleting;
+      resume.disabled = busy || item.deleting || item.editing;
       resume.onclick = () =>
         action(resume, () => api("/api/jobs/" + item.id + "/start", {}));
       controls.append(resume);
     }
+    const edit = el("button", "history-control", "编辑");
+    edit.setAttribute("aria-label", "编辑任务 " + item.options.seeds.join("、"));
+    edit.disabled = ui.active === item.id || item.deleting || item.editing || !ui.capabilities.editTask;
+    edit.title = ui.active === item.id ? "请先暂停采集，再编辑设置" : "编辑层数与查询间隔";
+    edit.onclick = () => openEditor(item.id);
+    controls.append(edit);
     const remove = el("button", "history-control danger", "删除");
     remove.setAttribute(
       "aria-label",
       "删除任务 " + item.options.seeds.join("、"),
     );
-    remove.disabled = item.deleting || !ui.capabilities.deleteTask;
+    remove.disabled = item.deleting || item.editing || !ui.capabilities.deleteTask;
     remove.onclick = () => requestDelete(item.id, remove);
     controls.append(remove);
     history.append(entry);
@@ -290,14 +296,14 @@ function render() {
       " · 递归" +
       j.options.depth +
       "层 · " +
-      dateTime(j.created) +
-      (j.options.maxQueries
-        ? " · 每次最多" + j.options.maxQueries + "次查询"
-        : "")
+      dateTime(j.created) + (j.options.platform === "both" ? " · 双平台并发" : "") + " · 无查询次数限制"
     : "输入起始词，让搜索联想逐层生长。";
   $("#resume-btn").hidden =
     !j || !["ready", "paused", "error"].includes(j.status);
   $("#resume-btn").disabled = busy;
+  $("#edit-btn").hidden = !j;
+  $("#edit-btn").disabled = !j || ui.active === j.id || j.deleting || j.editing || !ui.capabilities.editTask;
+  $("#edit-btn").title = j && ui.active === j.id ? "请先暂停采集，再编辑设置" : "编辑层数与查询间隔";
   $("#resume-btn").textContent =
     j?.status === "ready" ? "开始此任务" : "继续采集";
   $("#pause-btn").hidden = !j || ui.active !== j.id;
@@ -729,6 +735,62 @@ function renderFiles() {
     box.append(card);
   }
 }
+let editingId = null;
+let savingEdit = false;
+function openEditor(id) {
+  const job = ui.jobs.find(j => j.id === id);
+  if (!job) return;
+  editingId = id;
+  const hasResults = job.completedQueries > 0;
+  $("#edit-seeds").value = job.options.seeds.join("\n");
+  $("#edit-platform").value = job.options.platform;
+  $("#edit-seeds").disabled = $("#edit-platform").disabled = hasResults;
+  $("#edit-depth").value = job.options.depth;
+  $("#edit-depth").min = hasResults ? job.options.depth : 1;
+  $("#edit-delay").value = job.options.delayMs / 1000;
+  $("#edit-preserve").textContent = hasResults
+    ? "已保留" + job.uniqueKeywords + "个词、" + job.completedQueries + "次查询。可增加层数、调整间隔；已有结果的起始词和平台不变。"
+    : "尚无成功查询，可修改起始词、平台、层数和间隔。";
+  $("#edit-error").hidden = true;
+  $("#edit-dialog").showModal();
+  $(hasResults ? "#edit-depth" : "#edit-seeds").focus();
+}
+function closeEditor() {
+  if (!savingEdit) $("#edit-dialog").close();
+}
+$("#edit-btn").onclick = () => openEditor(ui.selected);
+$("#close-edit").onclick = $("#cancel-edit").onclick = closeEditor;
+$("#edit-dialog").addEventListener("cancel", event => {
+  if (savingEdit) event.preventDefault();
+});
+$("#edit-form").onsubmit = async event => {
+  event.preventDefault();
+  if (savingEdit) return;
+  savingEdit = true;
+  $("#save-edit").disabled = $("#cancel-edit").disabled = $("#close-edit").disabled = true;
+  $("#save-edit").textContent = "保存中…";
+  $("#edit-error").hidden = true;
+  try {
+    await api("/api/jobs/" + editingId + "/edit", {
+      seeds: $("#edit-seeds").value.split(/\r?\n/).map(s => s.trim()).filter(Boolean),
+      platform: $("#edit-platform").value,
+      depth: Number($("#edit-depth").value),
+      delayMs: Math.round(Number($("#edit-delay").value) * 1000),
+    });
+    $("#edit-dialog").close();
+    await selectJob(editingId);
+    toast("设置已保存，已采集数据保留；点击继续采集即可续跑。");
+  } catch (error) {
+    $("#edit-error").textContent = error.message;
+    $("#edit-error").hidden = false;
+  } finally {
+    savingEdit = false;
+    $("#save-edit").disabled = $("#cancel-edit").disabled = $("#close-edit").disabled = false;
+    $("#save-edit").textContent = "保存设置";
+    await refresh().catch(() => {});
+  }
+};
+
 async function requestDelete(id, button) {
   const job = ui.jobs.find((j) => j.id === id);
   if (!job) return;
@@ -813,7 +875,6 @@ $("#task-form").onsubmit = (e) => {
       platform: document.querySelector("[name=platform]:checked").value,
       depth: Number($("#depth").value),
       delayMs: Number($("#delay").value),
-      maxQueries: Number($("#max-queries").value),
     });
     await selectJob(job.id);
     await api("/api/jobs/" + job.id + "/start", {});

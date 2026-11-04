@@ -114,8 +114,8 @@ export async function createApp({
       if (req.method === "GET" && url.pathname === "/api/bootstrap") {
         send(res, 200, {
           token,
-          version: "2.1.1",
-          capabilities: { deleteTask: true, trash: true },
+          version: "2.3.0",
+          capabilities: { deleteTask: true, trash: true, editTask: true, parallelPlatforms: true },
           dataDir: jobs.dataDir,
           workDir: jobs.workDir,
           jobs: jobs.list(),
@@ -178,6 +178,10 @@ export async function createApp({
       if (match) {
         const [, id, action] = match,
           j = jobs.get(id);
+        if (req.method === "POST" && action === "edit") {
+          send(res, 200, await jobs.update(id, await readJSON(req)));
+          return;
+        }
         if (req.method === "POST" && action === "delete") {
           await readJSON(req);
           send(res, 200, await jobs.delete(id));
@@ -197,7 +201,7 @@ export async function createApp({
         }
         if (req.method === "GET" && action === "download.zip") {
           // Completed downloads are immutable; refuse mixed snapshots mid-query.
-          if (jobs.active === id) {
+          if (jobs.active === id || j.editing) {
             send(res, 409, { error: "请先暂停采集，再下载完整结果包。" });
             return;
           }

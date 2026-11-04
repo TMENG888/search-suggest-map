@@ -343,18 +343,20 @@ export class BrowserProvider {
     this.options = options;
     this.contexts = new Map();
     this.pages = new Map();
-    this.lastQuery = 0;
+    this.lastQuery = new Map();
     this.transportErrors = [];
     this.loginPopupsClosed = 0;
   }
   async ready(page) {
-    this.loginPopupsClosed += await dismissLoginPopup(page);
+    const closed = await dismissLoginPopup(page);
+    this.loginPopupsClosed += closed;
     try {
       await assertAccess(page);
     } catch (error) {
       // One late-mounted ordinary dialog can appear between the two checks.
       if (!/登录弹窗阻挡/.test(error.message)) throw error;
-      this.loginPopupsClosed += await dismissLoginPopup(page);
+      const lateClosed = await dismissLoginPopup(page);
+      this.loginPopupsClosed += lateClosed;
       await assertAccess(page);
     }
   }
@@ -393,7 +395,7 @@ export class BrowserProvider {
       .first();
     if (!(await input.count()))
       throw new Error("没有可用搜索框：请先人工登录或检查页面；未当作无联想词");
-    const gap = this.options.delayMs - (Date.now() - this.lastQuery);
+    const gap = this.options.delayMs - (Date.now() - (this.lastQuery.get(platform) || 0));
     if (gap > 0) await page.waitForTimeout(gap);
     const inputMax = await input.getAttribute("maxlength");
     if (inputMax && term.length > Number(inputMax))
@@ -466,7 +468,7 @@ export class BrowserProvider {
       // Sequential key events trigger builds that do not open suggestions on
       // an input event alone. Do not submit a search or open video results.
       await input.pressSequentially(term, { delay: 80 });
-      this.lastQuery = Date.now();
+      this.lastQuery.set(platform, Date.now());
       const deadline = Date.now() + this.options.timeoutMs;
       let previous = "",
         stable = 0;

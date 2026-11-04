@@ -53,15 +53,12 @@ export function validateOptions(raw = {}) {
   if (!["douyin", "xiaohongshu", "both"].includes(platform))
     invalid("平台参数无效。");
   const depth = Number(raw.depth ?? 3),
-    delayMs = Number(raw.delayMs ?? 5000),
-    maxQueries = Number(raw.maxQueries ?? 0);
+    delayMs = Number(raw.delayMs ?? 5000);
   if (!Number.isInteger(depth) || depth < 1 || depth > 10)
     invalid("递归层数应为1至10。");
   if (!Number.isInteger(delayMs) || delayMs < 1500 || delayMs > 60000)
     invalid("查询间隔应为1500至60000毫秒。");
-  if (!Number.isInteger(maxQueries) || maxQueries < 0 || maxQueries > 100000)
-    invalid("查询上限应为0至100000，0表示不限。");
-  return { seeds, platform, depth, delayMs, maxQueries };
+  return { seeds, platform, depth, delayMs };
 }
 export function validateCheckpoint(s) {
   if (
@@ -234,6 +231,13 @@ export class JobManager extends EventEmitter {
         }
         for (const n of state.nodes)
           if (n.status === "querying") n.status = "pending";
+        // Migrate old test caps without changing manual pause or saved results.
+        const hadLegacyCap = Object.hasOwn(meta.options, "maxQueries");
+        meta.options = validateOptions(meta.options);
+        if (/达到本次查询上限/.test(meta.message || "")) {
+          meta.message = "查询次数限制已移除，可继续遍历至第" + meta.options.depth + "层。";
+          state.stopReason = meta.message;
+        }
         if (!["complete", "paused", "ready", "error"].includes(meta.status)) {
           meta.status = "paused";
           meta.message = "上次服务已停止，可从断点继续。";
@@ -251,6 +255,7 @@ export class JobManager extends EventEmitter {
         };
         this.jobs.set(name, job);
         await this.persist(job);
+        if (hadLegacyCap) await exportAll(state, dir, mindmapHTML);
       } catch (error) {
         this.emit("warning", {
           message: "跳过损坏或仍被占用的任务：" + name + " " + error.message,
@@ -262,13 +267,14 @@ export class JobManager extends EventEmitter {
     return {
       ...job.meta,
       deleting: !!job.deleting,
+      editing: !!job.editing,
       ...stats(job.state),
       byDepth: Array.from(
         { length: job.state.config.depth + 1 },
         (_, d) => job.state.nodes.filter((n) => n.depth === d).length,
       ),
-      current:
-        job.state.nodes.find((n) => n.status === "querying")?.term || null,
+      current: job.state.nodes.filter(n => n.status === "querying")
+        .map(n => (n.platform === "douyin" ? "抖音：" : "小红书：") + n.term).join(" · ") || null,
       logs: job.logs.slice(-100),
       ...(graph
         ? {
@@ -354,6 +360,7 @@ export class JobManager extends EventEmitter {
   }
   async delete(id) {
     const j = this.get(id);
+    if (j.editing) throw Object.assign(new Error("正在保存编辑，请稍候。"), { statusCode: 409 });
     if (j.deleting)
       throw Object.assign(new Error("任务正在删除，请稍候。"), {
         statusCode: 409,
@@ -451,6 +458,7 @@ export class JobManager extends EventEmitter {
         await fs.readFile(path.join(actual, "task.json"), "utf8"),
       );
     if (meta.id !== id) invalid("任务记录编号不一致。");
+    meta.options = validateOptions(meta.options);
     const lock = await fs.open(path.join(actual, "run.lock"), "wx");
     try {
       await lock.writeFile(
@@ -551,7 +559,6 @@ export class JobManager extends EventEmitter {
             : state.config.platforms[0],
         depth: state.config.depth,
         delayMs: 5000,
-        maxQueries: 0,
       };
     let audit = null;
     if (state.status === "complete") audit = auditState(state);
@@ -593,6 +600,70 @@ export class JobManager extends EventEmitter {
     this.notify(j, "已导入实采结果");
     return this.snapshot(j, { graph: true });
   }
+  async update(id, patch) {
+    const j = this.get(id);
+    if (this.closing || this.active === id || j.deleting || j.editing ||
+        !["ready", "paused", "error", "complete"].includes(j.meta.status))
+      throw Object.assign(new Error("请先暂停任务，等待保存完成后再编辑。"), { statusCode: 409 });
+    if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
+        Object.keys(patch).some(key => !["seeds", "platform", "depth", "delayMs"].includes(key)))
+      invalid("仅可编辑起始词、平台、递归层数和查询间隔。");
+    const options = validateOptions({ ...j.meta.options, ...patch });
+    const scopeChanged = JSON.stringify(options.seeds) !== JSON.stringify(j.meta.options.seeds) ||
+      options.platform !== j.meta.options.platform;
+    const hasResults = j.state.observations.length > 0;
+    if (hasResults && scopeChanged)
+      invalid("已有采集结果，起始词和平台保持不变；更换请新建任务。");
+    if (hasResults && options.depth < j.state.config.depth)
+      invalid("已有采集结果时可增加层数；减少层数请新建任务，避免丢失已有数据。");
+    j.editing = true;
+    let lock;
+    try {
+      await this.checkedTaskDirectory(id, j.dir);
+      try { lock = await fs.open(path.join(j.dir, "run.lock"), "wx"); }
+      catch (error) {
+        if (error.code === "EEXIST")
+          throw Object.assign(new Error("任务被其他程序占用，不能编辑。"), { statusCode: 409 });
+        throw error;
+      }
+      await lock.writeFile(JSON.stringify({ pid: process.pid, started: now(), operation: "edit" }));
+      const depthChanged = options.depth !== j.state.config.depth;
+      if (!hasResults && (scopeChanged || depthChanged)) {
+        j.state = createState({ seeds: options.seeds, platforms: options.platform === "both"
+          ? ["douyin", "xiaohongshu"] : [options.platform], depth: options.depth });
+        j.meta.status = "ready";
+      } else if (depthChanged) {
+        j.state.config.depth = options.depth;
+        for (const node of j.state.nodes)
+          if (node.status === "depth_boundary" && node.depth < options.depth) node.status = "pending";
+        j.state.status = "paused";
+        j.meta.status = "paused";
+        delete j.meta.audit;
+        await fs.unlink(path.join(j.dir, "完整性核验.json")).catch(error => {
+          if (error.code !== "ENOENT") throw error;
+        });
+      }
+      j.meta.options = options;
+      if (j.meta.status !== "complete") {
+        j.meta.message = "采集设置已保存，继续后遍历至第" + options.depth + "层，无查询次数限制。";
+        j.state.stopReason = j.meta.message;
+      }
+      await this.persist(j);
+      await exportAll(j.state, j.dir, mindmapHTML);
+    } finally {
+      try {
+        if (lock) {
+          await lock.close();
+          await fs.unlink(path.join(j.dir, "run.lock"));
+        }
+      } finally {
+        j.editing = false;
+        this.notify(j);
+      }
+    }
+    this.notify(j, "任务设置已更新，保留已采集数据");
+    return this.snapshot(j, { graph: true });
+  }
   reserve(id) {
     if (this.closing)
       throw Object.assign(new Error("服务正在退出。"), { statusCode: 409 });
@@ -607,6 +678,7 @@ export class JobManager extends EventEmitter {
   }
   start(id) {
     const j = this.get(id);
+    if (j.editing) throw Object.assign(new Error("正在保存编辑，请稍候。"), { statusCode: 409 });
     if (j.deleting)
       throw Object.assign(new Error("任务正在删除，请稍候。"), {
         statusCode: 409,
@@ -639,27 +711,20 @@ export class JobManager extends EventEmitter {
         timeoutMs: 12000,
       });
       await this.persist(j);
-      let calls = 0;
       while (!j.stop) {
         j.meta.status = "running";
         j.meta.message = "正在查询搜索联想词";
         this.notify(j);
-        const before = stats(j.state).completedQueries;
-        const remaining = j.meta.options.maxQueries
-          ? j.meta.options.maxQueries - calls
-          : 0;
         await crawl(j.state, j.provider, {
           checkpoint: path.join(j.dir, "checkpoint.json"),
-          maxQueries: remaining,
           stopping: () => j.stop,
           onProgress: async (node) => {
-            j.meta.message = "已采集：" + node.term;
+            j.meta.message = (node.platform === "douyin" ? "抖音" : "小红书") + "已采集：" + node.term;
             await this.persist(j);
             await exportAll(j.state, j.dir, mindmapHTML);
-            this.notify(j, "完成查询：" + node.term);
+            this.notify(j, (node.platform === "douyin" ? "抖音" : "小红书") + "完成查询：" + node.term);
           },
         });
-        calls += stats(j.state).completedQueries - before;
         if (j.state.status === "complete") {
           j.meta.audit = auditState(j.state);
           await save(path.join(j.dir, "完整性核验.json"), j.meta.audit);
@@ -669,11 +734,6 @@ export class JobManager extends EventEmitter {
         }
         if (j.stop) break;
         const reason = j.state.stopReason || "采集已暂停";
-        if (j.meta.options.maxQueries && calls >= j.meta.options.maxQueries) {
-          j.meta.status = "paused";
-          j.meta.message = reason;
-          break;
-        }
         if (
           /验证|人工登录|登录弹窗|人工关闭|平台限制|限流429|明确要求登录/.test(
             reason,

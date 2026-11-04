@@ -125,7 +125,6 @@ export async function crawl(
   provider,
   {
     checkpoint,
-    maxQueries = 0,
     stopping = () => false,
     onProgress = () => {},
   } = {},
@@ -134,39 +133,61 @@ export async function crawl(
     if (n.status === "querying") n.status = "pending";
   state.status = "running";
   state.stopReason = null;
-  let count = 0;
-  while (true) {
-    const node = state.nodes
-      .filter((n) => n.status === "pending")
-      .sort((a, b) => a.depth - b.depth)[0];
-    if (!node) {
-      state.status = "complete";
-      break;
-    }
-    if (stopping() || (maxQueries && count >= maxQueries)) {
-      state.status = "paused";
-      state.stopReason = stopping()
-        ? "用户停止"
-        : "达到本次查询上限（并非遍历完成）";
-      break;
-    }
-    node.status = "querying";
-    state.updated = now();
-    if (checkpoint) await save(checkpoint, state);
+  let commits = Promise.resolve(), halted = false, failure = null;
+  const fail = (error) => {
+    halted = true;
+    failure ||= String(error.message).slice(0, 1000);
+  };
+  // Browser waits run independently. All graph mutations, checkpoint writes and
+  // progress exports share one queue, including their asynchronous file writes.
+  const commit = (fn) => {
+    const result = commits.then(fn);
+    commits = result.catch(() => {});
+    return result;
+  };
+  const worker = async (platform) => {
     try {
-      const observation = await provider.get(node.platform, node.term);
-      applyObservation(state, node, observation);
-      count++;
-      if (checkpoint) await save(checkpoint, state);
-      await onProgress(node, stats(state));
+      while (true) {
+        const node = await commit(async () => {
+          if (halted || stopping()) return null;
+          const next = state.nodes.filter(n => n.platform === platform && n.status === "pending")
+            .sort((a,b) => a.depth - b.depth)[0];
+          if (!next) return null;
+          next.status = "querying";
+          state.updated = now();
+          if (checkpoint) await save(checkpoint, state);
+          return next;
+        });
+        if (!node) return;
+        let observation;
+        try { observation = await provider.get(platform, node.term); }
+        catch (error) {
+          fail(error);
+          await commit(async () => {
+            node.status = "pending";
+            node.error = String(error.message).slice(0, 1000);
+            if (checkpoint) await save(checkpoint, state);
+          });
+          return;
+        }
+        await commit(async () => {
+          // An in-flight success still belongs to the checkpoint after pause
+          // or another platform's failure; it must not be needlessly repeated.
+          applyObservation(state, node, observation);
+          if (checkpoint) await save(checkpoint, state);
+          await onProgress(node, stats(state));
+        });
+      }
     } catch (error) {
-      node.status = "pending";
-      node.error = String(error.message).slice(0, 1000);
-      state.status = "paused";
-      state.stopReason = node.error;
-      break;
+      fail(error);
     }
-  }
+  };
+  await Promise.all(state.config.platforms.map(worker));
+  await commits;
+  for (const node of state.nodes)
+    if (node.status === "querying") node.status = "pending";
+  state.status = failure || state.nodes.some(n => n.status === "pending") ? "paused" : "complete";
+  state.stopReason = state.status === "complete" ? null : failure || "用户停止";
   state.updated = now();
   if (checkpoint) await save(checkpoint, state);
   return state;

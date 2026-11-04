@@ -19,6 +19,7 @@ import {
   dismissLoginPopup,
 } from "./browser.mjs";
 import { mindmapHTML } from "./mindmap-template.mjs";
+import { auditState } from "./audit.mjs";
 const TEMP =
   process.env.SSM_TEST_DIR ||
   path.join(
@@ -134,13 +135,13 @@ test("login recovery waits for delayed controls and disappearance, ignores trans
   } finally { await browser.close(); }
 });
 
-test("cap is paused, checkpoint resume does not repeat successful work", async () => {
+test("manual pause preserves checkpoint and resume does not repeat successful work", async () => {
   const state = createState({ seeds: ["A"], platforms: ["douyin"], depth: 3 }),
     p = provider();
   const cp = path.join(TEMP, "resume.json");
-  await crawl(state, p, { checkpoint: cp, maxQueries: 2 });
+  await crawl(state, p, { checkpoint: cp, stopping: () => p.calls.length >= 2 });
   assert.equal(state.status, "paused");
-  assert.match(state.stopReason, /上限/);
+  assert.match(state.stopReason, /用户停止/);
   const resumed = JSON.parse(await fs.readFile(cp, "utf8"));
   await crawl(resumed, p, { checkpoint: cp });
   assert.equal(resumed.status, "complete");
@@ -169,6 +170,80 @@ test("same word on two platforms must be queried independently", async () => {
   await crawl(state, p);
   assert.deepEqual(p.calls, ["douyin:A", "xiaohongshu:A"]);
   assert.equal(state.nodes.length, 6);
+});
+
+test("two platform workers overlap, keep one query per platform and serialize checkpoints/exports", async () => {
+  const state = createState({seeds:["A"],platforms:["douyin","xiaohongshu"],depth:3});
+  const inflight = new Map(), calls = [];
+  let active = 0, peak = 0, saving = 0;
+  const dir = path.join(TEMP,"parallel");
+  await fs.mkdir(dir,{recursive:true});
+  await crawl(state, { get: async (platform,term) => {
+    assert.equal(inflight.get(platform)||0,0);
+    inflight.set(platform,1); active++; peak=Math.max(peak,active);
+    calls.push(platform+":"+term);
+    await new Promise(r=>setTimeout(r,20));
+    active--; inflight.set(platform,0);
+    return {source:"offline_test_fixture",suggestions:fixture[term]||[]};
+  }}, {checkpoint:path.join(dir,"checkpoint.json"), onProgress:async()=>{
+    assert.equal(saving,0,"concurrent exports must not overlap");saving++;
+    await exportAll(state,dir,mindmapHTML);
+    await new Promise(r=>setTimeout(r,5));saving--;
+  }});
+  assert.equal(peak,2);
+  assert.equal(state.status,"complete");
+  assert.equal(calls.length,10);
+  assert.equal(new Set(calls).size,10);
+  auditState(state,{requireLive:false});
+  const saved=JSON.parse(await fs.readFile(path.join(dir,"checkpoint.json"),"utf8"));
+  assert.equal(saved.status,"complete");
+  assert.equal(saved.observations.length,10);
+});
+
+test("platform failure drains the other in-flight success, stops new queries, resumes without duplicates", async () => {
+  const state=createState({seeds:["A"],platforms:["douyin","xiaohongshu"],depth:2});
+  let started=0, release;
+  const both=new Promise(r=>release=r), calls=[];
+  await crawl(state,{get:async(platform,term)=>{
+    calls.push(platform+":"+term);
+    if(++started===2)release();
+    await both;
+    if(platform==="douyin")throw new Error("平台要求验证");
+    await new Promise(r=>setTimeout(r,20));
+    return {source:"offline_test_fixture",suggestions:["A1"]};
+  }});
+  assert.equal(calls.length,2);
+  assert.equal(state.status,"paused");
+  assert.match(state.stopReason,/验证/);
+  assert.equal(state.observations.length,1);
+  assert.equal(state.nodes.find(n=>n.platform==="xiaohongshu"&&n.term==="A").status,"done");
+  await crawl(state,{get:async(platform,term)=>{
+    calls.push(platform+":"+term);
+    return {source:"offline_test_fixture",suggestions:term==="A"?["A1"]:[]};
+  }});
+  assert.equal(calls.filter(s=>s==="xiaohongshu:A").length,1);
+  assert.equal(state.status,"complete");
+  auditState(state,{requireLive:false});
+});
+
+test("pause drains both platform queries and keeps their successes; progress write errors never cause duplicate receipts", async()=>{
+  const state=createState({seeds:["A"],platforms:["douyin","xiaohongshu"],depth:2});
+  let started=0,stop=false,release;
+  const both=new Promise(r=>release=r);
+  await crawl(state,{get:async()=>{
+    if(++started===2){stop=true;release();}
+    await both; return {source:"offline_test_fixture",suggestions:["A1"]};
+  }},{stopping:()=>stop});
+  assert.equal(state.observations.length,2);
+  assert.equal(state.status,"paused");
+  assert.equal(state.nodes.filter(n=>n.status==="querying").length,0);
+  let failOnce=true;
+  await crawl(state,{get:async()=>({source:"offline_test_fixture",suggestions:[]})},
+    {onProgress:()=>{if(failOnce){failOnce=false;throw new Error("保存导出失败");}}});
+  assert.equal(state.status,"paused");
+  await crawl(state,{get:async()=>({source:"offline_test_fixture",suggestions:[]})});
+  assert.equal(new Set(state.observations.map(o=>o.nodeId)).size,state.observations.length);
+  auditState(state,{requireLive:false});
 });
 test("normalize whitespace/width without forcing children to be longer or to contain parent", async () => {
   assert.equal(normalize("  Ａ  B  "), "A B");
@@ -251,7 +326,8 @@ test("export preserves cross-edges, completion state and safe embedded data", as
     platforms: ["douyin"],
     depth: 3,
   });
-  await crawl(state, provider(), { maxQueries: 2 });
+  const p = provider();
+  await crawl(state, p, { stopping: () => p.calls.length >= 2 });
   const dir = path.join(TEMP, "export");
   await exportAll(state, dir, mindmapHTML);
   for (const name of [

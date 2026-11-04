@@ -61,7 +61,7 @@
                 >
                 <label class="both-platforms"
                   ><input type="radio" name="platform" value="both" />
-                  两个平台分别采集</label
+                  两个平台并发采集</label
                 >
               </div>
             </fieldset>
@@ -114,18 +114,7 @@
               </div>
             </div>
             <p id="depth-hint" class="hint">起始词为第0层，采集到第3层。</p>
-            <details class="advanced">
-              <summary>更多设置</summary>
-              <label class="field-label" for="max-queries">本次查询上限</label
-              ><input
-                id="max-queries"
-                type="number"
-                min="0"
-                max="100000"
-                value="0"
-              />
-              <p class="hint">0表示不限。达到上限后暂停，可继续采集。</p>
-            </details>
+            <p class="hint">无查询次数限制，遍历至指定层数后完成。</p>
             <button
               type="submit"
               id="start-btn"
@@ -165,6 +154,7 @@
             <p id="task-subtitle">输入起始词，让搜索联想逐层生长。</p>
           </div>
           <div class="task-actions">
+            <button id="edit-btn" class="button" hidden>编辑任务</button>
             <button id="delete-btn" class="button danger" hidden>
               删除任务
             </button>
@@ -355,6 +345,26 @@
       </div>
       <div id="dialog-body"></div>
       <button id="dialog-done" class="button primary">知道了</button>
+    </dialog>
+    <dialog id="edit-dialog" aria-labelledby="edit-title">
+      <div class="dialog-heading">
+        <h2 id="edit-title">编辑任务</h2>
+        <button id="close-edit" class="quiet icon-btn" aria-label="关闭编辑">×</button>
+      </div>
+      <form id="edit-form">
+        <label class="field-label" for="edit-seeds">起始词（每行一个）</label>
+        <textarea id="edit-seeds" rows="3" maxlength="6000" required></textarea>
+        <label class="field-label" for="edit-platform">采集平台</label>
+        <select id="edit-platform"><option value="douyin">抖音</option><option value="xiaohongshu">小红书</option><option value="both">双平台</option></select>
+        <div class="field-row">
+          <div><label class="field-label" for="edit-depth">递归层数</label><input id="edit-depth" type="number" min="1" max="10" required></div>
+          <div><label class="field-label" for="edit-delay">查询间隔（秒）</label><input id="edit-delay" type="number" min="1.5" max="60" step="0.001" required></div>
+        </div>
+        <p id="edit-preserve" class="hint"></p>
+        <p class="hint">无查询次数限制。保存后保持暂停，点击“继续采集”从断点续跑。</p>
+        <p id="edit-error" class="edit-error" role="alert" hidden></p>
+        <div class="dialog-actions"><button id="cancel-edit" type="button" class="button">取消</button><button id="save-edit" class="button primary" type="submit">保存设置</button></div>
+      </form>
     </dialog>
     <dialog id="delete-dialog">
       <h2 id="delete-title">删除任务？</h2>

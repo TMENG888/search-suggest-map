@@ -58,7 +58,7 @@ test("GUI options reject malformed or explosive configuration inputs", () => {
     { seeds: ["a"], depth: 0 },
     { seeds: ["a"], delayMs: 1 },
     { seeds: ["a"], platform: "evil" },
-    { seeds: ["a"], maxQueries: -1 },
+    { seeds: ["a"], depth: 11 },
   ])
     assert.throws(() => validateOptions(bad));
 });
@@ -163,7 +163,7 @@ test("pause after current query and resume do not repeat successful queries", as
   assert.equal(new Set(calls).size, 3);
   assert.equal(m.get(j.id).meta.status, "complete");
 });
-test("query cap is counted across manual verification within one invocation", async () => {
+test("legacy query cap cannot stop a run, including after manual verification", async () => {
   let attempts = 0;
   const m = await manager("cap", () => ({
     get: async (p, t) => {
@@ -178,11 +178,86 @@ test("query cap is counted across manual verification within one invocation", as
   await until(() => m.get(j.id).gate);
   m.continue(j.id);
   await m.get(j.id).promise;
-  assert.equal(m.get(j.id).meta.status, "paused");
-  assert.equal(m.snapshot(m.get(j.id)).completedQueries, 2);
-  m.start(j.id);
-  await m.get(j.id).promise;
   assert.equal(m.get(j.id).meta.status, "complete");
+  assert.equal(m.snapshot(m.get(j.id)).completedQueries, 3);
+  assert.equal(m.get(j.id).meta.options.maxQueries, undefined);
+});
+
+test("editing depth extends completed branches without repeating successful queries", async () => {
+  const calls = [];
+  const m = await manager("edit-depth", () => ({
+    get: async (p, t) => { calls.push(t); return observe(t); }, close: async () => {},
+  }));
+  const task = await m.create({ seeds: ["研究"], depth: 1 });
+  m.start(task.id);
+  await m.get(task.id).promise;
+  const before = structuredClone(m.get(task.id).state.observations);
+  const edited = await m.update(task.id, { depth: 2, delayMs: 3000 });
+  assert.equal(edited.status, "paused");
+  assert.equal(edited.pendingQueries, 2);
+  assert.equal(edited.audit, undefined);
+  assert.deepEqual(m.get(task.id).state.observations, before);
+  await assert.rejects(fs.stat(path.join(task.outputDir, "完整性核验.json")), {code:"ENOENT"});
+  await assert.rejects(m.update(task.id, { depth: 1 }), /减少层数/);
+  await assert.rejects(m.update(task.id, { seeds: ["别的词"] }), /新建任务/);
+  await assert.rejects(m.update(task.id, { maxQueries: 7 }), /仅可编辑/);
+  await assert.rejects(m.update(task.id, { delayMs: 1 }), /间隔/);
+  const reloaded = new JobManager({ dataDir: m.dataDir, workDir: m.workDir,
+    providerFactory: m.providerFactory });
+  await reloaded.init();
+  assert.equal(reloaded.get(task.id).meta.options.depth, 2);
+  assert.equal(reloaded.get(task.id).meta.options.delayMs, 3000);
+  reloaded.start(task.id);
+  await reloaded.get(task.id).promise;
+  assert.equal(reloaded.get(task.id).meta.status, "complete");
+  assert.deepEqual(calls, ["研究", "研究方法", "研究工具"]);
+  auditState(reloaded.get(task.id).state);
+});
+
+test("edit preflight protects active tasks and foreign locks; unsampled scope can change", async () => {
+  let release;
+  const m = await manager("edit-boundaries", () => ({ get: async (p,t) => {
+    await new Promise(r => release = r); return observe(t);
+  }, close: async () => {} }));
+  const task = await m.create({ seeds: ["初始"], depth: 3 });
+  await m.update(task.id, { seeds: ["研究"], platform: "both", depth: 1 });
+  assert.equal(m.get(task.id).state.nodes.length, 2);
+  assert.equal(m.get(task.id).state.nodes[0].term, "研究");
+  const lock = path.join(task.outputDir, "run.lock");
+  await fs.writeFile(lock, JSON.stringify({pid: process.pid}));
+  const before = structuredClone(m.get(task.id).meta.options);
+  await assert.rejects(m.update(task.id, {delayMs: 3000}), /其他程序/);
+  assert.deepEqual(m.get(task.id).meta.options, before);
+  assert.equal(m.get(task.id).editing, false);
+  await fs.unlink(lock);
+  const saving = m.update(task.id, {platform: "douyin"});
+  assert.throws(() => m.start(task.id), /保存编辑/);
+  await assert.rejects(m.delete(task.id), /保存编辑/);
+  await saving;
+  m.start(task.id);
+  await until(() => release);
+  await assert.rejects(m.update(task.id, {depth: 2}), /先暂停/);
+  release();
+  await m.get(task.id).promise;
+});
+
+test("restart removes old query caps while retaining paused task data", async () => {
+  const m = await manager("migrate-cap");
+  const task = await m.create({seeds: ["研究"], depth: 2});
+  const job = m.get(task.id);
+  job.meta.options.maxQueries = 7;
+  job.meta.status = job.state.status = "paused";
+  job.meta.message = job.state.stopReason = "达到本次查询上限（并非遍历完成）";
+  await m.persist(job);
+  const reloaded = new JobManager({dataDir:m.dataDir,workDir:m.workDir,providerFactory:m.providerFactory});
+  await reloaded.init();
+  assert.equal(reloaded.get(task.id).meta.options.maxQueries, undefined);
+  assert.equal(reloaded.get(task.id).meta.status, "paused");
+  assert.match(reloaded.get(task.id).meta.message, /限制已移除/);
+  reloaded.start(task.id);
+  await reloaded.get(task.id).promise;
+  assert.equal(reloaded.get(task.id).meta.status, "complete");
+  assert.equal(reloaded.snapshot(reloaded.get(task.id)).completedQueries, 3);
 });
 test("single running task / manual platform session excludes competing jobs", async () => {
   let release;

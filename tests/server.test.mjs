@@ -66,6 +66,10 @@ test("HTTP workflow: local security, task creation, collection, safe exports, ZI
     const response = await post("/api/jobs", { seeds: ["界面测试"], depth: 1 });
     assert.equal(response.status, 201);
     const j = await response.json();
+    const edit = await post("/api/jobs/" + j.id + "/edit", {delayMs: 3000});
+    assert.equal(edit.status, 200);
+    assert.equal((await edit.json()).options.delayMs, 3000);
+    assert.equal((await post("/api/jobs/" + j.id + "/edit", {maxQueries:7})).status,400);
     assert.equal((await post("/api/jobs/" + j.id + "/start", {})).status, 200);
     await m.get(j.id).promise;
     const result = await (await fetch(app.url + "/api/jobs/" + j.id)).json();

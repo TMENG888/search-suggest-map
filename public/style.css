@@ -1587,6 +1587,16 @@ dialog::backdrop {
   gap: 10px;
   margin-top: 22px;
 }
+#edit-dialog { width: 480px; max-height: calc(100dvh - 32px); overflow: auto; }
+#edit-dialog h2 { font-size: 18px; }
+#edit-dialog .field-label { margin-top: 18px; }
+#edit-dialog textarea, #edit-dialog select, #edit-dialog input { width: 100%; }
+#edit-dialog :disabled { cursor: default; }
+#edit-dialog textarea:disabled, #edit-dialog select:disabled { background: var(--panel); opacity: 1; color: #586b84; }
+#edit-dialog .button { min-height: 44px; }
+.edit-error { color: #a6293d; font-size: 13px; line-height: 1.6; margin-top: 12px; }
+.history-control { min-height: 32px; padding: 6px 2px; }
+@media (pointer: coarse) { .history-control { min-height: 44px; } }
 #delete-dialog h2 {
   font-size: 18px;
   margin-bottom: 15px;
