@@ -1,6 +1,6 @@
 {
   "name": "search-suggest-map",
-  "version": "2.1.0",
+  "version": "2.1.1",
   "private": true,
   "description": "搜索联想词递归采集工作台：抖音、小红书、断点续跑与交互式思维导图",
   "type": "module",

@@ -120,57 +120,70 @@ export async function assertRestrictions(page) {
   return text;
 }
 
-export async function dismissLoginPopup(page, { maxClose = 2 } = {}) {
+const LOGIN_DIALOGS = '[id^="login-full-panel"],.login-container';
+const LOGIN_CLOSE = [
+  '[aria-label="关闭"]', '[aria-label="Close"]', '[title="关闭"]',
+  '[data-e2e="login-close"]', '[data-e2e="login-close-button"]',
+  '.close-button', '[class*="close"]', '[class*="Close"]', '.YoNA2Hyj',
+  // Observed Douyin header: title followed by a div containing the X SVG.
+  '#douyin_login_comp_flat_panel_header > div:has(> svg)',
+];
+
+async function visibleLogin(page) {
+  const dialogs = page.locator(LOGIN_DIALOGS);
+  for (let i = 0; i < await dialogs.count(); i++)
+    if (await loginVisible(dialogs.nth(i))) return dialogs.nth(i);
+  return null;
+}
+
+export async function dismissLoginPopup(page, { maxClose = 2, controlTimeoutMs = 3000 } = {}) {
   // Only normal UI clicks on a visible login dialog's close control. Never
   // remove an overlay, force-click through it, or close verification prompts.
   await assertRestrictions(page);
   let closed = 0;
   for (let attempt = 0; attempt < maxClose; attempt++) {
-    const dialogs = page.locator('[id^="login-full-panel"],.login-container');
-    let dialog;
-    for (let i = 0; i < (await dialogs.count()); i++)
-      if (await loginVisible(dialogs.nth(i))) {
-        dialog = dialogs.nth(i);
-        break;
-      }
+    let dialog = await visibleLogin(page);
     if (!dialog) return closed;
-    const selectors = [
-      '[aria-label="关闭"]',
-      '[aria-label="Close"]',
-      '[title="关闭"]',
-      '[data-e2e="login-close"]',
-      '[data-e2e="login-close-button"]',
-      '[class*="close"]',
-      '[class*="Close"]',
-      ".YoNA2Hyj",
-    ];
     let clicked = false;
-    for (const selector of selectors) {
-      const controls = dialog.locator(selector);
-      for (let i = 0; i < (await controls.count()); i++) {
-        const control = controls.nth(i);
-        if (!(await control.isVisible())) continue;
-        try {
-          await control.click({ timeout: 2000 });
-          clicked = true;
-          closed++;
-          break;
-        } catch {
-          await assertRestrictions(page);
+    const deadline = Date.now() + controlTimeoutMs;
+    // The portal mounts before its close control on some platform builds.
+    // Wait for the ordinary UI instead of immediately requesting manual help.
+    while (Date.now() < deadline && !clicked) {
+      await assertRestrictions(page);
+      dialog = await visibleLogin(page);
+      if (!dialog) return closed;
+      for (const selector of LOGIN_CLOSE) {
+        const controls = dialog.locator(selector);
+        for (let i = 0; i < (await controls.count()); i++) {
+          const control = controls.nth(i);
+          if (!(await control.isVisible())) continue;
+          try {
+            await control.click({ timeout: Math.min(700, Math.max(1, deadline - Date.now())) });
+            clicked = true;
+            break;
+          } catch {
+            await assertRestrictions(page);
+          }
         }
+        if (clicked || Date.now() >= deadline) break;
       }
-      if (clicked) break;
+      if (!clicked) await page.waitForTimeout(100);
     }
     if (!clicked)
       throw new Error(
         "登录弹窗未找到可正常点击的关闭按钮，已保留断点；请人工关闭",
       );
-    await page.waitForTimeout(350);
-    await assertRestrictions(page);
+    // A successful click is not yet proof that the modal disappeared.
+    const disappearDeadline = Date.now() + 2000;
+    while (await loginVisible(dialog)) {
+      await assertRestrictions(page);
+      if (Date.now() >= disappearDeadline)
+        throw new Error("登录弹窗关闭按钮已点击但弹窗未消失，已保留断点");
+      await page.waitForTimeout(100);
+    }
+    closed++;
   }
-  const dialogs = page.locator('[id^="login-full-panel"],.login-container');
-  for (let i = 0; i < (await dialogs.count()); i++)
-    if (await loginVisible(dialogs.nth(i)))
+  if (await visibleLogin(page))
       throw new Error("登录弹窗关闭后仍持续出现，已暂停；请检查是否要求登录");
   return closed;
 }
@@ -178,10 +191,15 @@ export async function dismissLoginPopup(page, { maxClose = 2 } = {}) {
 async function loginVisible(dialog) {
   // Portals can mount fixed overlays inside a zero-size host div. Visibility
   // of the host alone misses a modal that still intercepts normal clicks.
+  if (!await dialog.count()) return false;
   return dialog.evaluate((root) =>
     [root, ...root.querySelectorAll("*")].some((e) => {
       const r = e.getBoundingClientRect(),
         s = getComputedStyle(e);
+      for (let ancestor = e; ancestor; ancestor = ancestor.parentElement) {
+        const style = getComputedStyle(ancestor);
+        if (style.display === "none" || Number(style.opacity) === 0) return false;
+      }
       return (
         r.width > 0 &&
         r.height > 0 &&
@@ -331,7 +349,14 @@ export class BrowserProvider {
   }
   async ready(page) {
     this.loginPopupsClosed += await dismissLoginPopup(page);
-    await assertAccess(page);
+    try {
+      await assertAccess(page);
+    } catch (error) {
+      // One late-mounted ordinary dialog can appear between the two checks.
+      if (!/登录弹窗阻挡/.test(error.message)) throw error;
+      this.loginPopupsClosed += await dismissLoginPopup(page);
+      await assertAccess(page);
+    }
   }
   async open(platform) {
     if (this.pages.has(platform)) return this.pages.get(platform);

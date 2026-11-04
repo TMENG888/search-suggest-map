@@ -109,6 +109,31 @@ test("optional login popup closes with a normal UI click; real restrictions rema
     await browser.close();
   }
 });
+test("login recovery waits for delayed controls and disappearance, ignores transparent ancestors", async () => {
+  const { chromium } = await loadPlaywright();
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(`<input id="search"><div class="login-container" style="position:fixed;inset:0;background:white">扫码登录</div>
+      <script>setTimeout(()=>{const b=document.createElement('button');b.className='close-button';b.textContent='×';b.onclick=()=>setTimeout(()=>b.parentElement.remove(),650);document.querySelector('.login-container').append(b)},500)</script>`);
+    assert.equal(await dismissLoginPopup(page), 1);
+    await page.locator('#search').click({timeout:1000});
+    await assertAccess(page);
+    await page.setContent(`<input id="search"><div style="opacity:0"><div class="login-container" style="position:fixed;inset:0">扫码登录<button class="close-button" onclick="window.clicked=true">×</button></div></div>`);
+    assert.equal(await dismissLoginPopup(page), 0);
+    await assertAccess(page);
+    assert.equal(await page.evaluate(()=>!!window.clicked), false);
+    // Stable header structure still works when the site's hashed class changes.
+    await page.setContent(`<input id="search"><div id="login-full-panel-new"><div id="douyin_login_comp_flat_panel_header"><div>登录后免费畅享高清视频</div><div class="new-hash" onclick="document.getElementById('login-full-panel-new').remove()"><svg width="37" height="36"></svg></div></div></div>`);
+    assert.equal(await dismissLoginPopup(page), 1);
+    await page.locator('#search').click();
+    await page.setContent(`<div class="login-container">扫码登录<button class="close-button">×</button></div>`);
+    await assert.rejects(dismissLoginPopup(page), /未消失/);
+    await page.setContent(`<div class="login-container">扫码登录</div>`);
+    await assert.rejects(dismissLoginPopup(page,{controlTimeoutMs:300}), /未找到/);
+  } finally { await browser.close(); }
+});
+
 test("cap is paused, checkpoint resume does not repeat successful work", async () => {
   const state = createState({ seeds: ["A"], platforms: ["douyin"], depth: 3 }),
     p = provider();
