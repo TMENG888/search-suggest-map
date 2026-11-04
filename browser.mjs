@@ -209,7 +209,7 @@ export async function assertAccess(page) {
 
 export async function readDropdown(page, platform, inputSelector) {
   return page.evaluate(
-    ({ site, inputSelector }) => {
+    ({ site, inputSelector, platform }) => {
       const visible = (e) => {
         const style = getComputedStyle(e);
         return (
@@ -279,7 +279,17 @@ export async function readDropdown(page, platform, inputSelector) {
             items = [...items[0].children].filter(visible);
         }
         const values = items
-          .map((x) => (x.innerText || "").trim().split("\n").filter(Boolean))
+          .map((x) => {
+            // XHS renders highlighted suggestions as one span per character.
+            // innerText inserts line breaks between these spans. Read only
+            // the verified word wrapper, not the whole row (badges/counts).
+            const word =
+              platform === "xiaohongshu" && x.matches(".sug-item")
+                ? x.querySelector(".sug-text-wrapper")
+                : null;
+            if (word && visible(word)) return [(word.textContent || "").trim()];
+            return (x.innerText || "").trim().split("\n").filter(Boolean);
+          })
           .filter((lines) => lines.length === 1)
           .map((lines) => lines[0])
           .filter(
@@ -306,7 +316,7 @@ export async function readDropdown(page, platform, inputSelector) {
       }
       return null;
     },
-    { site: SITES[platform], inputSelector },
+    { site: SITES[platform], inputSelector, platform },
   );
 }
 

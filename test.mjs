@@ -287,3 +287,38 @@ test("real browser DOM extraction and offline map rendering", async () => {
     await browser.close();
   }
 });
+
+test("XHS guest autocomplete joins highlighted characters without badges or login", async () => {
+  const { chromium } = await loadPlaywright();
+  const browser = await chromium.launch({ channel: "msedge", headless: true });
+  try {
+    const page = await browser.newPage({
+      viewport: { width: 1400, height: 900 },
+    });
+    await page.setContent(`<input id="search-input" value="老年" placeholder="登录探索更多内容" style="margin-left:300px;width:500px;height:30px">
+      <button class="login-btn">登录</button>
+      <div class="login-container" style="position:fixed;inset:0;background:white;z-index:9"><div class="icon-btn-wrapper close-button" onclick="this.parentElement.remove()">关闭</div>扫码登录</div>
+      <div class="sug-container" style="position:absolute;left:308px;top:38px;width:500px">
+        <div class="sug-item"><div class="sug-text-wrapper"><span style="display:block">老</span><span style="display:block">年</span><span style="display:block">人</span><span style="display:block">头像</span></div><span>热门</span></div>
+        <div class="sug-item"><div class="sug-text-wrapper">老年人 AI 手机</div><span>1000</span></div>
+        <div class="sug-item" style="display:none"><div class="sug-text-wrapper">隐藏词</div></div>
+      </div><div class="video-card">不得采集推荐视频标题</div>`);
+    assert.equal(await dismissLoginPopup(page), 1);
+    await assertAccess(page);
+    const found = await readDropdown(page, "xiaohongshu", "#search-input");
+    assert.deepEqual(found.suggestions, ["老年人头像", "老年人 AI 手机"]);
+    assert.equal(
+      await page.getByRole("button", { name: "登录", exact: true }).isVisible(),
+      true,
+    );
+    await page
+      .locator(".sug-container")
+      .evaluate((x) => (x.style.display = "none"));
+    assert.equal(
+      await readDropdown(page, "xiaohongshu", "#search-input"),
+      null,
+    );
+  } finally {
+    await browser.close();
+  }
+});

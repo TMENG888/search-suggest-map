@@ -114,7 +114,7 @@ export async function createApp({
       if (req.method === "GET" && url.pathname === "/api/bootstrap") {
         send(res, 200, {
           token,
-          version: "2.0.0",
+          version: "2.0.1",
           dataDir: jobs.dataDir,
           workDir: jobs.workDir,
           jobs: jobs.list(),
