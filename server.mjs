@@ -114,7 +114,8 @@ export async function createApp({
       if (req.method === "GET" && url.pathname === "/api/bootstrap") {
         send(res, 200, {
           token,
-          version: "2.0.1",
+          version: "2.1.0",
+          capabilities: { deleteTask: true, trash: true },
           dataDir: jobs.dataDir,
           workDir: jobs.workDir,
           jobs: jobs.list(),
@@ -153,6 +154,18 @@ export async function createApp({
         send(res, 200, await jobs.openSession((await readJSON(req)).platform));
         return;
       }
+      if (req.method === "GET" && url.pathname === "/api/trash") {
+        send(res, 200, await jobs.trashList());
+        return;
+      }
+      const restoreMatch = url.pathname.match(
+        /^\/api\/trash\/([0-9a-f-]{36})\/restore$/,
+      );
+      if (req.method === "POST" && restoreMatch) {
+        await readJSON(req);
+        send(res, 200, await jobs.restore(restoreMatch[1]));
+        return;
+      }
       if (req.method === "POST" && url.pathname === "/api/browser/close") {
         await readJSON(req);
         await jobs.closeSession();
@@ -165,6 +178,11 @@ export async function createApp({
       if (match) {
         const [, id, action] = match,
           j = jobs.get(id);
+        if (req.method === "POST" && action === "delete") {
+          await readJSON(req);
+          send(res, 200, await jobs.delete(id));
+          return;
+        }
         if (req.method === "GET" && !action) {
           send(res, 200, jobs.snapshot(j, { graph: true }));
           return;

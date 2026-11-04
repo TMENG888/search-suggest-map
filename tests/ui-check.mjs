@@ -166,6 +166,31 @@ try {
   await page.locator("#help-btn").click();
   assert(await page.locator("#info-dialog").isVisible());
   await page.locator("#close-dialog").click();
+  await page.locator("#delete-btn").click();
+  await page.locator("#delete-dialog").waitFor({ state: "visible" });
+  await page.locator("#delete-dialog button[value=cancel]").click();
+  assert.equal(await page.locator("#history-count").innerText(), "2");
+  await page.locator("#delete-btn").click();
+  await page.locator("#confirm-delete").click();
+  await page.waitForFunction(
+    () => document.querySelector("#history-count").textContent === "1",
+  );
+  await page.locator("#undo-delete").click();
+  await page.waitForFunction(
+    () => document.querySelector("#history-count").textContent === "2",
+  );
+  await page.locator("#history-list .history-control.danger").first().click();
+  await page.locator("#confirm-delete").click();
+  await page.waitForFunction(
+    () => document.querySelector("#history-count").textContent === "1",
+  );
+  await page.locator("#trash-btn").click();
+  await page.locator("#trash-dialog").waitFor({ state: "visible" });
+  await page.locator("#trash-list button").first().click();
+  await page.waitForFunction(
+    () => document.querySelector("#history-count").textContent === "2",
+  );
+  await page.locator("#close-trash").click();
   assert.deepEqual(errors, []);
   const report = {
     passed: true,
@@ -177,6 +202,10 @@ try {
     downloadZip: true,
     importCheckpoint: true,
     reloadHistory: true,
+    deleteConfirmation: true,
+    deleteCancel: true,
+    undoDelete: true,
+    restoreFromTrash: true,
     mobileWidth: 390,
     horizontalOverflow: false,
     consoleErrors: errors,

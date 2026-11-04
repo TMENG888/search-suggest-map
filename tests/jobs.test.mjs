@@ -250,3 +250,78 @@ test("audit refuses partial or malformed results", async () => {
   s.observations.pop();
   assert.throws(() => auditState(s));
 });
+
+test("delete moves only task contents to trash; restore preserves data across restart", async () => {
+  const m = await manager("trash-roundtrip"),
+    j = await m.create({ seeds: ["研究"], depth: 2 });
+  m.start(j.id);
+  await m.get(j.id).promise;
+  await fs.mkdir(path.join(m.workDir, "profiles"), { recursive: true });
+  await fs.writeFile(path.join(m.workDir, "profiles", "sentinel"), "keep");
+  const removed = await m.delete(j.id);
+  assert.throws(() => m.get(j.id));
+  await assert.rejects(fs.stat(j.outputDir), { code: "ENOENT" });
+  const list = await m.trashList();
+  assert.equal(list.length, 1);
+  assert.equal(list[0].taskId, j.id);
+  assert.equal(
+    await fs.readFile(path.join(m.workDir, "profiles", "sentinel"), "utf8"),
+    "keep",
+  );
+  const reloaded = new JobManager({ dataDir: m.dataDir, workDir: m.workDir });
+  await reloaded.init();
+  assert.equal(reloaded.list().length, 0);
+  const restored = await reloaded.restore(removed.trashId);
+  assert.equal(restored.id, j.id);
+  assert.equal(restored.uniqueKeywords, 5);
+  assert.equal(restored.status, "complete");
+  assert.equal((await reloaded.trashList()).length, 0);
+});
+test("delete running task waits for current query, then closes browser before moving files", async () => {
+  let release,
+    closed = false;
+  const m = await manager("delete-active", () => ({
+    get: async (p, t) => {
+      await new Promise((r) => (release = r));
+      return observe(t);
+    },
+    close: async () => {
+      closed = true;
+    },
+  }));
+  const j = await m.create({ seeds: ["研究"], depth: 2 });
+  m.start(j.id);
+  await until(() => release);
+  let deleted = false;
+  const removal = m.delete(j.id).then((r) => {
+    deleted = true;
+    return r;
+  });
+  assert.throws(() => m.start(j.id), /删除/);
+  await pause(30);
+  assert(!deleted);
+  release();
+  const record = await removal;
+  assert(closed);
+  assert.equal(m.active, null);
+  const restored = await m.restore(record.trashId);
+  assert.equal(restored.status, "paused");
+  assert.equal(restored.completedQueries, 1);
+  assert.equal(restored.pendingQueries, 2);
+});
+test("delete refuses a foreign run lock and a directory outside the task root", async () => {
+  const m = await manager("delete-boundary"),
+    j = await m.create({ seeds: ["研究"], depth: 1 });
+  const lock = path.join(j.outputDir, "run.lock");
+  await fs.writeFile(lock, JSON.stringify({ pid: process.pid }));
+  await assert.rejects(m.delete(j.id), /其他程序/);
+  await fs.unlink(lock);
+  assert(m.get(j.id));
+  const actual = m.get(j.id),
+    original = actual.dir;
+  actual.dir = m.workDir;
+  await assert.rejects(m.delete(j.id), /目录/);
+  actual.dir = original;
+  assert((await fs.stat(m.workDir)).isDirectory());
+  assert.equal((await m.trashList()).length, 0);
+});

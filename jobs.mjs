@@ -261,6 +261,7 @@ export class JobManager extends EventEmitter {
   snapshot(job, { graph = false } = {}) {
     return {
       ...job.meta,
+      deleting: !!job.deleting,
       ...stats(job.state),
       byDepth: Array.from(
         { length: job.state.config.depth + 1 },
@@ -312,6 +313,181 @@ export class JobManager extends EventEmitter {
     j.meta.updated = now();
     await save(path.join(j.dir, "task.json"), j.meta);
     await save(path.join(j.dir, "checkpoint.json"), j.state);
+  }
+  async checkedTaskDirectory(id, directory) {
+    if (!/^[0-9a-f-]{36}$/.test(id)) invalid("任务编号无效。");
+    const root = await fs.realpath(this.dataDir),
+      expected = path.join(root, id),
+      actual = await fs.realpath(directory),
+      info = await fs.lstat(directory);
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      path.relative(expected, actual) !== ""
+    )
+      throw new Error("任务目录不在预期的数据目录内，操作已停止。");
+    return actual;
+  }
+  async trashRoot() {
+    const root = await fs.realpath(this.dataDir),
+      trash = path.join(root, ".trash");
+    await fs.mkdir(trash, { recursive: true });
+    const info = await fs.lstat(trash),
+      actual = await fs.realpath(trash);
+    if (info.isSymbolicLink() || path.relative(trash, actual) !== "")
+      throw new Error("回收区目录异常，操作已停止。");
+    return actual;
+  }
+  async trashList() {
+    const root = await this.trashRoot(),
+      records = [];
+    for (const id of await fs.readdir(root)) {
+      if (!/^[0-9a-f-]{36}$/.test(id)) continue;
+      try {
+        const record = JSON.parse(
+          await fs.readFile(path.join(root, id, "deleted.json"), "utf8"),
+        );
+        if (record.trashId === id) records.push(record);
+      } catch {}
+    }
+    return records.sort((a, b) => b.deletedAt.localeCompare(a.deletedAt));
+  }
+  async delete(id) {
+    const j = this.get(id);
+    if (j.deleting)
+      throw Object.assign(new Error("任务正在删除，请稍候。"), {
+        statusCode: 409,
+      });
+    j.deleting = true;
+    this.notify(j);
+    let locked = false,
+      original;
+    try {
+      if (this.active === id) {
+        this.pause(id);
+        await j.promise;
+      }
+      original = await this.checkedTaskDirectory(id, j.dir);
+      const trash = await this.trashRoot(),
+        trashId = randomUUID(),
+        target = path.join(trash, trashId);
+      // Resolve and verify both directory boundaries before moving a subtree.
+      if (path.dirname(target) !== trash)
+        throw new Error("回收区目标路径无效。");
+      const lock = await fs.open(path.join(original, "run.lock"), "wx");
+      locked = true;
+      try {
+        await lock.writeFile(
+          JSON.stringify({
+            pid: process.pid,
+            action: "delete",
+            started: now(),
+          }),
+        );
+      } finally {
+        await lock.close();
+      }
+      const record = {
+        trashId,
+        taskId: id,
+        seeds: j.meta.options.seeds,
+        platform: j.meta.options.platform,
+        depth: j.meta.options.depth,
+        deletedAt: now(),
+        ...stats(j.state),
+      };
+      await save(path.join(original, "deleted.json"), record);
+      await fs.rename(original, target);
+      this.jobs.delete(id);
+      locked = false;
+      await fs.unlink(path.join(target, "run.lock")).catch(() => {});
+      this.emit("update", { id, deleted: true });
+      return { id, trashId, message: "任务和采集内容已移入回收区" };
+    } catch (error) {
+      if (error.code === "EEXIST")
+        throw Object.assign(new Error("任务正被其他程序使用，暂不能删除。"), {
+          statusCode: 409,
+        });
+      throw error;
+    } finally {
+      if (locked)
+        await fs.unlink(path.join(original, "run.lock")).catch(() => {});
+      j.deleting = false;
+      if (this.jobs.has(id)) this.notify(j);
+    }
+  }
+  async restore(trashId) {
+    if (!/^[0-9a-f-]{36}$/.test(trashId)) invalid("回收记录编号无效。");
+    const root = await fs.realpath(this.dataDir),
+      trash = await this.trashRoot(),
+      directory = path.join(trash, trashId),
+      actual = await fs.realpath(directory),
+      info = await fs.lstat(directory);
+    if (info.isSymbolicLink() || path.relative(directory, actual) !== "")
+      throw new Error("回收记录目录异常。");
+    const record = JSON.parse(
+      await fs.readFile(path.join(actual, "deleted.json"), "utf8"),
+    );
+    if (record.trashId !== trashId || !/^[0-9a-f-]{36}$/.test(record.taskId))
+      invalid("回收记录无效。");
+    const id = record.taskId,
+      target = path.join(root, id);
+    if (this.jobs.has(id))
+      throw Object.assign(new Error("同一任务已经存在。"), { statusCode: 409 });
+    try {
+      await fs.access(target);
+      throw Object.assign(new Error("原任务目录已存在，未覆盖。"), {
+        statusCode: 409,
+      });
+    } catch (e) {
+      if (e.code !== "ENOENT") throw e;
+    }
+    const state = validateCheckpoint(
+        JSON.parse(
+          await fs.readFile(path.join(actual, "checkpoint.json"), "utf8"),
+        ),
+      ),
+      meta = JSON.parse(
+        await fs.readFile(path.join(actual, "task.json"), "utf8"),
+      );
+    if (meta.id !== id) invalid("任务记录编号不一致。");
+    const lock = await fs.open(path.join(actual, "run.lock"), "wx");
+    try {
+      await lock.writeFile(
+        JSON.stringify({ pid: process.pid, action: "restore" }),
+      );
+    } finally {
+      await lock.close();
+    }
+    try {
+      await fs.rename(actual, target);
+    } catch (e) {
+      await fs.unlink(path.join(actual, "run.lock")).catch(() => {});
+      throw e;
+    }
+    await fs.unlink(path.join(target, "run.lock")).catch(() => {});
+    await fs.unlink(path.join(target, "deleted.json")).catch(() => {});
+    for (const n of state.nodes)
+      if (n.status === "querying") n.status = "pending";
+    if (!["complete", "ready", "paused", "error"].includes(meta.status)) {
+      meta.status = "paused";
+      state.status = "paused";
+    }
+    meta.outputDir = target;
+    meta.message = "已从回收区恢复";
+    const j = {
+      meta,
+      state,
+      dir: target,
+      logs: [],
+      provider: null,
+      gate: null,
+      stop: false,
+    };
+    this.jobs.set(id, j);
+    await this.persist(j);
+    this.notify(j);
+    return this.snapshot(j, { graph: true });
   }
   notify(j, message) {
     if (message) {
@@ -431,6 +607,10 @@ export class JobManager extends EventEmitter {
   }
   start(id) {
     const j = this.get(id);
+    if (j.deleting)
+      throw Object.assign(new Error("任务正在删除，请稍候。"), {
+        statusCode: 409,
+      });
     if (!idleStatuses.has(j.meta.status))
       throw Object.assign(new Error("当前任务不能启动。"), { statusCode: 409 });
     this.reserve(id);

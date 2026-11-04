@@ -18,6 +18,7 @@
       <div class="top-actions">
         <span id="connection" class="connection"><i></i>连接中</span
         ><button id="import-btn" class="quiet">导入断点 / 结果</button
+        ><button id="trash-btn" class="quiet">回收区</button
         ><button id="help-btn" class="quiet icon-btn" aria-label="使用说明">
           ?
         </button>
@@ -164,6 +165,9 @@
             <p id="task-subtitle">输入起始词，让搜索联想逐层生长。</p>
           </div>
           <div class="task-actions">
+            <button id="delete-btn" class="button danger" hidden>
+              删除任务
+            </button>
             <button id="resume-btn" class="button" hidden>继续采集</button
             ><button id="pause-btn" class="button" hidden>暂停采集</button
             ><a id="zip-btn" class="button primary" hidden>下载结果包</a>
@@ -351,6 +355,26 @@
       </div>
       <div id="dialog-body"></div>
       <button id="dialog-done" class="button primary">知道了</button>
+    </dialog>
+    <dialog id="delete-dialog">
+      <h2 id="delete-title">删除任务？</h2>
+      <p id="delete-message"></p>
+      <form method="dialog" class="dialog-actions">
+        <button class="button" value="cancel">取消</button
+        ><button id="confirm-delete" class="button danger" value="delete">
+          删除任务及内容
+        </button>
+      </form>
+    </dialog>
+    <dialog id="trash-dialog">
+      <div class="dialog-heading">
+        <h2>回收区</h2>
+        <button id="close-trash" class="quiet icon-btn" aria-label="关闭回收区">
+          ×
+        </button>
+      </div>
+      <p class="hint">已删除的任务及采集内容可在这里恢复。</p>
+      <div id="trash-list"></div>
     </dialog>
     <div id="toast" class="toast" role="status" hidden></div>
   </body>

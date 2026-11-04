@@ -35,6 +35,7 @@ const ui = {
   tableLimit: 200,
   refreshing: false,
   refreshAgain: false,
+  capabilities: {},
 };
 function el(tag, cls, text) {
   const n = document.createElement(tag);
@@ -48,13 +49,27 @@ function svg(tag, attrs = {}) {
   return n;
 }
 let toastTimer;
-function toast(message, error = false) {
+function toast(message, error = false, undo = null) {
   const n = $("#toast");
   n.textContent = message;
+  if (undo) {
+    const button = el("button", "toast-action", "撤销");
+    button.id = "undo-delete";
+    button.onclick = () =>
+      action(button, async () => {
+        const restored = await api("/api/trash/" + undo + "/restore", {});
+        await selectJob(restored.id);
+        toast("任务与采集内容已恢复。");
+      });
+    n.append(button);
+  }
   n.className = "toast" + (error ? " error" : "");
   n.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (n.hidden = true), error ? 9000 : 4200);
+  toastTimer = setTimeout(
+    () => (n.hidden = true),
+    undo ? 12000 : error ? 9000 : 4200,
+  );
 }
 async function api(url, body) {
   const res = await fetch(
@@ -71,7 +86,10 @@ async function api(url, body) {
         },
   );
   const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "操作失败，请稍后再试。");
+  if (!res.ok)
+    throw Object.assign(new Error(data.error || "操作失败，请稍后再试。"), {
+      status: res.status,
+    });
   return data;
 }
 async function action(button, fn) {
@@ -122,12 +140,31 @@ async function refresh() {
     ui.jobs = boot.jobs;
     ui.active = boot.active;
     ui.session = boot.session;
+    ui.capabilities = boot.capabilities || {};
     ui.paths = { data: boot.dataDir, work: boot.workDir };
-    if (!ui.jobs.some((j) => j.id === ui.selected))
+    if (!ui.jobs.some((j) => j.id === ui.selected)) {
       ui.selected = ui.jobs[0]?.id || null;
+      ui.selectedNode = null;
+      ui.collapsed.clear();
+      ui.positions.clear();
+      ui.autoFolded = false;
+      if (ui.selected) localStorage.setItem("ssm-selected", ui.selected);
+      else localStorage.removeItem("ssm-selected");
+    }
     const selected = ui.selected;
     if (selected) {
-      const job = await api("/api/jobs/" + selected);
+      let job;
+      try {
+        job = await api("/api/jobs/" + selected);
+      } catch (e) {
+        if (e.status === 404) {
+          ui.selected = null;
+          ui.job = null;
+          ui.refreshAgain = true;
+          return;
+        }
+        throw e;
+      }
       if (ui.selected === selected) ui.job = job;
     } else ui.job = null;
     render();
@@ -164,6 +201,7 @@ function render() {
   }
   $("#start-btn").disabled = busy;
   $("#open-browser").disabled = busy;
+  $("#trash-btn").disabled = !ui.capabilities.trash;
   $("#history-count").textContent = ui.jobs.length;
   const history = $("#history-list");
   history.replaceChildren();
@@ -204,7 +242,43 @@ function render() {
     );
     b.append(line, meta);
     b.onclick = () => selectJob(item.id).catch((e) => toast(e.message, true));
-    history.append(b);
+    const entry = el("div", "history-entry"),
+      controls = el("div", "history-controls");
+    entry.append(b, controls);
+    if (ui.active === item.id) {
+      const pause = el("button", "history-control", "暂停");
+      pause.setAttribute(
+        "aria-label",
+        "暂停任务 " + item.options.seeds.join("、"),
+      );
+      pause.disabled = item.status === "pausing" || item.deleting;
+      pause.onclick = () =>
+        action(pause, () => api("/api/jobs/" + item.id + "/pause", {}));
+      controls.append(pause);
+    } else if (["paused", "ready", "error"].includes(item.status)) {
+      const resume = el(
+        "button",
+        "history-control",
+        item.status === "ready" ? "开始" : "继续",
+      );
+      resume.setAttribute(
+        "aria-label",
+        "继续任务 " + item.options.seeds.join("、"),
+      );
+      resume.disabled = busy || item.deleting;
+      resume.onclick = () =>
+        action(resume, () => api("/api/jobs/" + item.id + "/start", {}));
+      controls.append(resume);
+    }
+    const remove = el("button", "history-control danger", "删除");
+    remove.setAttribute(
+      "aria-label",
+      "删除任务 " + item.options.seeds.join("、"),
+    );
+    remove.disabled = item.deleting || !ui.capabilities.deleteTask;
+    remove.onclick = () => requestDelete(item.id, remove);
+    controls.append(remove);
+    history.append(entry);
   }
   $("#task-title").textContent = j ? j.options.seeds.join("、") : "关键词地图";
   $("#task-title").title = j ? j.options.seeds.join("、") : "";
@@ -230,6 +304,9 @@ function render() {
   $("#pause-btn").disabled = j?.status === "pausing";
   $("#pause-btn").textContent =
     j?.status === "pausing" ? "正在保存…" : "暂停采集";
+  $("#delete-btn").hidden = !j;
+  $("#delete-btn").disabled = !!j?.deleting || !ui.capabilities.deleteTask;
+  $("#delete-btn").textContent = j?.deleting ? "正在删除…" : "删除任务";
   $("#zip-btn").hidden = !j || ui.active === j.id;
   if (j) {
     $("#zip-btn").href = "/api/jobs/" + j.id + "/download.zip";
@@ -652,6 +729,77 @@ function renderFiles() {
     box.append(card);
   }
 }
+async function requestDelete(id, button) {
+  const job = ui.jobs.find((j) => j.id === id);
+  if (!job) return;
+  const running = ui.active === id;
+  $("#delete-title").textContent =
+    "删除“" + job.options.seeds.join("、") + "”？";
+  $("#delete-message").textContent =
+    (running ? "将先停止当前任务并等待查询结束，再将" : "将") +
+    "该任务及已采集的" +
+    job.uniqueKeywords +
+    "个关键词、" +
+    job.relations +
+    "条关系和导出内容移入回收区。删除后可撤销，也可在回收区恢复。";
+  const d = $("#delete-dialog");
+  d.returnValue = "cancel";
+  const confirmed = new Promise((resolve) =>
+    d.addEventListener("close", () => resolve(d.returnValue === "delete"), {
+      once: true,
+    }),
+  );
+  d.showModal();
+  if (!(await confirmed)) return;
+  await action(button, async () => {
+    const removed = await api("/api/jobs/" + id + "/delete", {});
+    await refresh();
+    toast("任务与采集内容已移入回收区。", false, removed.trashId);
+  });
+}
+async function renderTrash() {
+  const records = await api("/api/trash"),
+    box = $("#trash-list");
+  box.replaceChildren();
+  if (!records.length) {
+    box.append(el("p", "hint", "回收区为空。"));
+    return;
+  }
+  for (const record of records) {
+    const row = el("div", "trash-row"),
+      info = el("div");
+    info.append(
+      el("strong", "", record.seeds.join("、")),
+      el(
+        "p",
+        "hint",
+        record.uniqueKeywords +
+          "词 · " +
+          record.relations +
+          "条关系 · " +
+          dateTime(record.deletedAt),
+      ),
+    );
+    const restore = el("button", "button small", "恢复");
+    restore.setAttribute("aria-label", "恢复任务 " + record.seeds.join("、"));
+    restore.onclick = () =>
+      action(restore, async () => {
+        const j = await api("/api/trash/" + record.trashId + "/restore", {});
+        await selectJob(j.id);
+        await renderTrash();
+        toast("任务与采集内容已恢复。");
+      });
+    row.append(info, restore);
+    box.append(row);
+  }
+}
+$("#delete-btn").onclick = () => requestDelete(ui.selected, $("#delete-btn"));
+$("#trash-btn").onclick = () =>
+  action($("#trash-btn"), async () => {
+    await renderTrash();
+    $("#trash-dialog").showModal();
+  });
+$("#close-trash").onclick = () => $("#trash-dialog").close();
 $("#task-form").onsubmit = (e) => {
   e.preventDefault();
   action($("#start-btn"), async () => {

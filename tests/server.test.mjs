@@ -100,6 +100,18 @@ test("HTTP workflow: local security, task creation, collection, safe exports, ZI
       "complete",
     );
     assert.equal((await post("/api/import", { version: 1 })).status, 400);
+    const deleted = await post("/api/jobs/" + j.id + "/delete", {});
+    assert.equal(deleted.status, 200);
+    const record = await deleted.json();
+    assert.equal((await fetch(app.url + "/api/jobs/" + j.id)).status, 404);
+    const trash = await (await fetch(app.url + "/api/trash")).json();
+    assert.equal(trash.length, 1);
+    const restored = await post(
+      "/api/trash/" + record.trashId + "/restore",
+      {},
+    );
+    assert.equal(restored.status, 200);
+    assert.equal((await restored.json()).id, j.id);
   } finally {
     await app.close();
   }

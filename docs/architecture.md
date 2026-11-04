@@ -44,6 +44,8 @@ GUI全局只允许一个任务或一个平台登录会话，工作目录有服�
 - `POST /api/jobs`：创建任务。
 - `GET /api/jobs/:id`：任务详情与图数据。
 - `POST /api/jobs/:id/start|pause|continue`：生命周期操作。
+- `POST /api/jobs/:id/delete`：先停稳运行中的任务，再把其目录移入数据目录下的`.trash/`；不操作共享浏览器资料。
+- `GET /api/trash`、`POST /api/trash/:id/restore`：回收区列表及恢复。目录移动前校验实际路径，拒绝目录链接、越界目录及被其他进程占用的任务。
 - `POST /api/import`：校验并导入JSON检查点或完整结果。
 - `POST /api/browser/open|close`：准备登录会话。
 - `GET /api/jobs/:id/download.zip`：稳定状态的完整结果包。

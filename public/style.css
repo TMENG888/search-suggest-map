@@ -1524,6 +1524,121 @@ dialog::backdrop {
     padding: 23px;
   }
 }
+.button.danger {
+  color: #b24052;
+  border-color: #ebc9d0;
+  background: #fff8fa;
+}
+.button.danger:hover {
+  background: #fcebf0;
+  border-color: #d992a0;
+}
+.history-entry {
+  border: 1px solid transparent;
+  border-radius: 8px;
+  margin: 5px 0;
+  overflow: hidden;
+}
+.history-entry:has(.selected) {
+  background: var(--blue-light);
+  border-color: #dbe7ff;
+}
+.history-entry .history-item {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+}
+.history-controls {
+  display: flex;
+  gap: 14px;
+  justify-content: flex-end;
+  padding: 0 10px 9px;
+}
+.history-control {
+  background: none;
+  border: 0;
+  padding: 3px 0;
+  font-size: 11px;
+  color: #365f9e;
+}
+.history-control.danger {
+  color: #b24052;
+}
+.history-control:hover {
+  text-decoration: underline;
+}
+.history-control:disabled {
+  color: #9aa8bc;
+  cursor: default;
+  text-decoration: none;
+}
+.toast-action {
+  margin-left: 17px;
+  border: 0;
+  background: none;
+  color: white;
+  text-decoration: underline;
+  padding: 3px 0;
+  cursor: pointer;
+}
+.dialog-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 22px;
+}
+#delete-dialog h2 {
+  font-size: 18px;
+  margin-bottom: 15px;
+}
+#delete-message {
+  font-size: 12px;
+  line-height: 2;
+  color: #657790;
+  overflow-wrap: anywhere;
+}
+.trash-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 15px 0;
+  border-bottom: 1px solid var(--line);
+}
+.trash-row strong {
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.trash-row .hint {
+  margin-bottom: 0;
+}
+#trash-list {
+  max-height: 55vh;
+  overflow: auto;
+}
+@media (max-width: 760px) {
+  .topbar {
+    height: auto;
+    min-height: 68px;
+    flex-wrap: wrap;
+    padding-top: 12px;
+    padding-bottom: 12px;
+  }
+  .top-actions {
+    margin-left: auto;
+  }
+  .history-entry {
+    flex: 0 0 206px;
+  }
+  .history-entry .history-item {
+    width: 100%;
+    min-width: 0;
+  }
+  .task-actions {
+    flex-wrap: wrap;
+    justify-content: flex-end;
+  }
+}
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
