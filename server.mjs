@@ -114,7 +114,7 @@ export async function createApp({
       if (req.method === "GET" && url.pathname === "/api/bootstrap") {
         send(res, 200, {
           token,
-          version: "2.3.0",
+          version: "2.4.0",
           capabilities: { deleteTask: true, trash: true, editTask: true, parallelPlatforms: true },
           dataDir: jobs.dataDir,
           workDir: jobs.workDir,

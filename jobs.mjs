@@ -27,6 +27,14 @@ export const EXPORTS = new Set([
   "完整性核验.json",
 ]);
 const idleStatuses = new Set(["ready", "paused", "error"]);
+export function pauseKind(reason) {
+  // Match explicit error categories, never the word 验证 inside 可验证下拉词.
+  if (/^平台要求验证(?:[：:]|$)/.test(reason)) return "verification";
+  if (/^(?:平台限制[：:]|平台限流429[：:])/.test(reason)) return "restriction";
+  if (/^(?:平台明确要求登录后搜索|需要人工登录|登录弹窗)/.test(reason)) return "login";
+  if (/^(?:未确认联想结果|等待联想结果超时|部分联想结果未确认)/.test(reason)) return "result";
+  return null;
+}
 function invalid(message) {
   throw Object.assign(new Error(message), { statusCode: 400 });
 }
@@ -107,7 +115,7 @@ export function validateCheckpoint(s) {
       !Number.isInteger(n.depth) ||
       n.depth < 0 ||
       n.depth > s.config.depth ||
-      !["pending", "querying", "done", "depth_boundary"].includes(n.status)
+      !["pending", "querying", "unconfirmed", "done", "depth_boundary"].includes(n.status)
     )
       invalid("检查点包含非法节点。");
     if (n.depth === s.config.depth && n.status !== "depth_boundary")
@@ -279,13 +287,14 @@ export class JobManager extends EventEmitter {
       ...(graph
         ? {
             nodes: job.state.nodes.map(
-              ({ id, platform, term, depth, parent, status }) => ({
+              ({ id, platform, term, depth, parent, status, error }) => ({
                 id,
                 platform,
                 term,
                 depth,
                 parent,
                 status,
+                error,
               }),
             ),
             edges: job.state.edges,
@@ -724,6 +733,12 @@ export class JobManager extends EventEmitter {
             await exportAll(j.state, j.dir, mindmapHTML);
             this.notify(j, (node.platform === "douyin" ? "抖音" : "小红书") + "完成查询：" + node.term);
           },
+          onUnconfirmed: async (node) => {
+            j.meta.message = (node.platform === "douyin" ? "抖音" : "小红书") + "「" + node.term + "」结果待确认，继续其他词";
+            await this.persist(j);
+            await exportAll(j.state,j.dir,mindmapHTML);
+            this.notify(j,j.meta.message);
+          },
         });
         if (j.state.status === "complete") {
           j.meta.audit = auditState(j.state);
@@ -734,15 +749,11 @@ export class JobManager extends EventEmitter {
         }
         if (j.stop) break;
         const reason = j.state.stopReason || "采集已暂停";
-        if (
-          /验证|人工登录|登录弹窗|人工关闭|平台限制|限流429|明确要求登录/.test(
-            reason,
-          )
-        ) {
-          j.meta.status = /验证/.test(reason)
-            ? "awaiting_verification"
-            : "awaiting_browser";
-          j.meta.message = /登录弹窗|人工登录|明确要求登录/.test(reason)
+        const kind = pauseKind(reason);
+        if (kind) {
+          j.meta.status = kind === "verification" ? "awaiting_verification" :
+            kind === "result" ? "awaiting_result" : "awaiting_browser";
+          j.meta.message = kind === "login"
             ? "登录提示仍挡住搜索框。请在平台窗口关闭提示，或按平台要求登录"
             : reason;
           // Keep exactly this browser context alive. No automated CAPTCHA attempt,
@@ -752,7 +763,8 @@ export class JobManager extends EventEmitter {
           });
           await this.persist(j);
           await exportAll(j.state, j.dir, mindmapHTML);
-          this.notify(j, "请在浏览器处理平台提示，完成后点击「已处理，继续」");
+          this.notify(j, kind === "result" ? "未确认的词和窗口均已保留，可点击「重试未确认词」；没有检测到验证码或强制登录" :
+            "请在浏览器处理平台提示，完成后点击「已处理，继续」");
           const proceed = await wait;
           j.gate = null;
           if (!proceed || j.stop) break;
@@ -815,7 +827,7 @@ export class JobManager extends EventEmitter {
     const j = this.get(id);
     if (
       !j.gate ||
-      !["awaiting_verification", "awaiting_browser"].includes(j.meta.status)
+      !["awaiting_verification", "awaiting_browser", "awaiting_result"].includes(j.meta.status)
     )
       throw Object.assign(new Error("当前没有等待人工处理的任务。"), {
         statusCode: 409,

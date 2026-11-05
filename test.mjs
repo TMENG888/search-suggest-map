@@ -17,6 +17,7 @@ import {
   loadPlaywright,
   assertAccess,
   dismissLoginPopup,
+  BrowserProvider,
 } from "./browser.mjs";
 import { mindmapHTML } from "./mindmap-template.mjs";
 import { auditState } from "./audit.mjs";
@@ -296,6 +297,12 @@ test("interrupted querying nodes are recovered as pending", async () => {
   assert.equal(p.calls.length, 1);
 });
 test("response parser requires supported schema and successful status", () => {
+  assert.deepEqual(parseResponse("xiaohongshu",{code:1000,success:true,data:{sug_items:[]}}),[]);
+  assert.deepEqual(parseResponse("xiaohongshu",{code:1000,success:true,data:{sug_items:[{text:"真实联想"}]}}),["真实联想"]);
+  assert.equal(parseResponse("xiaohongshu",{code:3002,success:false,msg:"方案执行结果为NULL",data:null}),null);
+  assert.equal(parseResponse("xiaohongshu",{code:1000,success:false,data:{sug_items:[]}}),null);
+  assert.equal(parseResponse("xiaohongshu",{code:1000,data:{sug_items:[]}}),null);
+  assert.equal(parseResponse("douyin",{code:1000,success:true,data:{sug_items:[]}}),null);
   assert.deepEqual(
     parseResponse("douyin", {
       status_code: 0,
@@ -319,6 +326,46 @@ test("response parser requires supported schema and successful status", () => {
     parseResponse("xiaohongshu", { code: 0, data: { sug_items: [{}] } }),
     null,
   );
+});
+
+test("slow dropdowns receive one bounded UI recovery; confirmed empty and failed envelopes stay distinct",async()=>{
+  const {chromium}=await loadPlaywright();
+  const browser=await chromium.launch({channel:"msedge",headless:true});
+  try {
+    const page=await browser.newPage({viewport:{width:1400,height:900}});
+    const p=new BrowserProvider({workDir:path.join(TEMP,"wait-recovery"),delayMs:0,timeoutMs:600,recoveryTimeoutMs:3000});
+    p.pages.set("xiaohongshu",page);
+    await page.setContent(`<input id="search-input" style="margin-left:300px;width:500px;height:30px">
+      <script>document.querySelector('input').addEventListener('input',e=>{if(e.target.value==='慢词')setTimeout(()=>{
+        if(document.querySelector('.sug-container'))return;
+        const panel=document.createElement('div');panel.className='sug-container';panel.style.cssText='position:absolute;left:308px;top:38px;width:500px';
+        panel.innerHTML='<div class="sug-item"><span class="sug-text-wrapper">慢词的真实衍生</span></div>';document.body.append(panel);
+      },1400)})</script>`);
+    const slow=await p.get("xiaohongshu","慢词");
+    assert.deepEqual(slow.suggestions,["慢词的真实衍生"]);
+    let failedRequests=0;
+    await page.route('https://www.xiaohongshu.com/**',async route=>{
+      if(new URL(route.request().url()).pathname==='/explore')return route.fulfill({contentType:'text/html',body:`<input id="search-input"><script>
+        document.querySelector('input').addEventListener('input',e=>fetch('/api/sns/web/v1/search/recommend?keyword='+encodeURIComponent(e.target.value)).then(r=>r.json()))
+        </script>`});
+      const query=new URL(route.request().url()).searchParams.get('keyword');
+      if(query==='空词')failedRequests++;
+      return route.fulfill({contentType:'application/json',body:JSON.stringify(query==='空词'
+        ?{code:3002,success:false,msg:'方案执行结果为NULL',data:null}
+        :{code:1000,success:true,data:{sug_items:[]}})});
+    });
+    await page.goto('https://www.xiaohongshu.com/explore');
+    p.options.timeoutMs=3000;
+    const empty=await p.get('xiaohongshu','无候选');
+    assert.equal(empty.source,'browser_autocomplete_response');
+    assert.deepEqual(empty.suggestions,[]);
+    await assert.rejects(p.get('xiaohongshu','空词'),error=>error.code==='RESULT_UNCONFIRMED'&&/3002/.test(error.message));
+    assert.equal(failedRequests,2,"only initial attempt plus one recovery");
+    const diagnostic=JSON.parse(await fs.readFile(path.join(TEMP,'wait-recovery/diagnostics/xiaohongshu-latest.json'),'utf8'));
+    assert.equal(diagnostic.network.at(-1).code,3002);
+    assert.equal(diagnostic.input.focused,true);
+    assert.equal(diagnostic.errorCode,'RESULT_UNCONFIRMED');
+  } finally {await browser.close();}
 });
 test("export preserves cross-edges, completion state and safe embedded data", async () => {
   const state = createState({

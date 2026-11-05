@@ -70,7 +70,11 @@ export const SITES = {
 
 export function parseResponse(platform, body) {
   const code = body?.status_code ?? body?.code;
-  if (code !== undefined && code !== 0 && code !== 200) return null;
+  // Observed XHS success envelope is code=1000 AND success=true. Failed
+  // envelopes (including 3002/NULL) are not confirmed empty suggestions.
+  if (body?.success === false) return null;
+  if (code !== undefined && code !== 0 && code !== 200 &&
+      !(platform === "xiaohongshu" && code === 1000 && body?.success === true)) return null;
   const arrays =
     platform === "douyin"
       ? [body?.sug_list, body?.data?.sug_list, body?.data?.sug_items]
@@ -387,6 +391,8 @@ export class BrowserProvider {
     return page;
   }
   async get(platform, term) {
+    const startedAt = Date.now();
+    const diagnostics = { platform, term, startedAt: now(), network: [], recovery: null };
     const page = await this.open(platform);
     await this.ready(page);
     const input = page
@@ -437,16 +443,29 @@ export class BrowserProvider {
           return;
         if (response.status() === 429) {
           responses.push({ blocked: true });
+          diagnostics.network.push({ elapsedMs: Date.now() - startedAt, httpStatus: 429 });
           return;
         }
-        if (!response.ok()) return;
+        if (!response.ok()) {
+          const problem = { unconfirmed: true, httpStatus: response.status() };
+          responses.push(problem);
+          diagnostics.network.push({ elapsedMs: Date.now() - startedAt, ...problem });
+          return;
+        }
         try {
-          const suggestions = parseResponse(platform, await response.json());
+          const body = await response.json();
+          const suggestions = parseResponse(platform, body);
+          const envelope = { elapsedMs: Date.now() - startedAt, httpStatus: response.status(),
+            code: body?.status_code ?? body?.code, success: body?.success,
+            message: String(body?.msg ?? body?.message ?? "").slice(0,200),
+            suggestionCount: suggestions === null ? null : suggestions.length };
+          diagnostics.network.push(envelope);
           if (active && suggestions !== null)
             responses.push({
               suggestions,
               endpoint: url.origin + url.pathname,
             });
+          else if (active) responses.push({ unconfirmed: true, ...envelope });
         } catch {}
       })();
       pending.add(task);
@@ -469,10 +488,34 @@ export class BrowserProvider {
       // an input event alone. Do not submit a search or open video results.
       await input.pressSequentially(term, { delay: 80 });
       this.lastQuery.set(platform, Date.now());
-      const deadline = Date.now() + this.options.timeoutMs;
+      let deadline = Date.now() + this.options.timeoutMs;
+      let generationStart = 0;
+      let generationStartedAt = Date.now();
       let previous = "",
         stable = 0;
-      while (Date.now() < deadline) {
+      const unconfirmed = () => {
+        const latest = diagnostics.network.at(-1);
+        const detail = latest?.message ? "；平台响应：" + latest.code + "（" + latest.message + "）" : "";
+        const error = new Error("等待联想结果超时：" + (platform === "douyin" ? "抖音" : "小红书") +
+          "「" + term + "」经等待和一次重新输入，仍未取得可确认的联想结果" + detail);
+        error.code = "RESULT_UNCONFIRMED";
+        return error;
+      };
+      const recover = async (reason) => {
+        await this.ready(page);
+        const gap = this.options.delayMs - (Date.now() - this.lastQuery.get(platform));
+        if (gap > 0) await page.waitForTimeout(gap);
+        diagnostics.recovery = { reason, elapsedMs: Date.now() - startedAt };
+        generationStart = responses.length;
+        await input.click({timeout:3000});
+        await input.fill("");
+        await input.pressSequentially(term, {delay:80});
+        this.lastQuery.set(platform,Date.now());
+        generationStartedAt = Date.now();
+        deadline = Date.now() + (this.options.recoveryTimeoutMs ?? this.options.timeoutMs);
+        previous = ""; stable = 0;
+      };
+      while (true) {
         await page.waitForTimeout(400);
         await this.ready(page);
         if (normalize(await input.inputValue()) !== normalize(term))
@@ -497,11 +540,11 @@ export class BrowserProvider {
               observedAt: now(),
               loginPopupsClosed: this.loginPopupsClosed,
             };
-        }
+        } else { previous = ""; stable = 0; }
         // Passive observation only: use the site's own autocomplete response,
         // matched to the exact full query. Never call an unsigned private API.
         const network = responses.find((x) => Array.isArray(x.suggestions));
-        if (network && Date.now() > deadline - this.options.timeoutMs + 1800)
+        if (network && Date.now() - generationStartedAt >= 1800)
           return {
             ...network,
             source: "browser_autocomplete_response",
@@ -509,11 +552,12 @@ export class BrowserProvider {
             observedAt: now(),
             loginPopupsClosed: this.loginPopupsClosed,
           };
+        const backendFailure = !network && responses.slice(generationStart).some(x => x.unconfirmed);
+        if (backendFailure || Date.now() >= deadline) {
+          if (!diagnostics.recovery) await recover(backendFailure ? "platform_response_unconfirmed" : "result_wait_timeout");
+          else throw unconfirmed();
+        }
       }
-      await this.ready(page);
-      throw new Error(
-        "未确认联想结果：当前页面未返回可验证下拉词；可能需要登录、功能未开放或页面结构已变。已暂停，不记为零结果",
-      );
     } catch (error) {
       const dir = path.join(this.options.workDir, "diagnostics");
       await fs.mkdir(dir, { recursive: true });
@@ -521,6 +565,13 @@ export class BrowserProvider {
         await page.screenshot({
           path: path.join(dir, platform + "-latest.png"),
         });
+      } catch {}
+      try {
+        diagnostics.elapsedMs = Date.now() - startedAt;
+        diagnostics.error = error.message;
+        diagnostics.errorCode = error.code || null;
+        diagnostics.input = await input.evaluate(e => ({value:e.value,focused:document.activeElement === e,documentFocused:document.hasFocus()}));
+        await fs.writeFile(path.join(dir,platform+"-latest.json"),JSON.stringify(diagnostics,null,2));
       } catch {}
       try {
         await assertAccess(page);

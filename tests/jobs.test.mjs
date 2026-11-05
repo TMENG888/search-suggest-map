@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
-import { JobManager, validateOptions, validateCheckpoint } from "../jobs.mjs";
+import { JobManager, validateOptions, validateCheckpoint, pauseKind } from "../jobs.mjs";
 import { auditState } from "../audit.mjs";
 import { createState, crawl } from "../core.mjs";
 
@@ -61,6 +61,44 @@ test("GUI options reject malformed or explosive configuration inputs", () => {
     { seeds: ["a"], depth: 11 },
   ])
     assert.throws(() => validateOptions(bad));
+});
+
+test("unconfirmed dropdown text never implies a CAPTCHA or login",()=>{
+  assert.equal(pauseKind("未确认联想结果：当前页面未返回可验证下拉词；可能需要登录"),"result");
+  assert.equal(pauseKind("等待联想结果超时：小红书「验证码」仍未返回"),"result");
+  assert.equal(pauseKind("平台要求验证：已暂停，请人工处理"),"verification");
+  assert.equal(pauseKind("平台限流429：已暂停，不继续请求"),"restriction");
+  assert.equal(pauseKind("平台明确要求登录后搜索：关闭普通登录提示后仍需人工登录"),"login");
+  assert.equal(pauseKind("普通保存失败，错误文本提到了验证"),null);
+});
+
+test("unconfirmed words are deferred while remaining words finish, then use a result gate and retry only failures",async()=>{
+  let fail=true,attempts=0;
+  const calls=[];
+  const m=await manager("deferred-results",()=>({get:async(platform,term)=>{
+    calls.push(term);
+    if(term==="研究方法"&&fail){attempts++;const error=new Error("等待联想结果超时：平台响应3002");error.code="RESULT_UNCONFIRMED";throw error;}
+    return observe(term);
+  },close:async()=>{}}));
+  const task=await m.create({seeds:["研究"],depth:2});
+  m.start(task.id);
+  await until(()=>m.get(task.id).gate);
+  const result=m.snapshot(m.get(task.id));
+  assert.equal(result.status,"awaiting_result");
+  assert.equal(result.completedQueries,2);
+  assert.equal(result.unconfirmedQueries,1);
+  assert.equal(result.pendingQueries,1);
+  assert.equal(attempts,1);
+  assert(calls.includes("研究工具"));
+  const cp=JSON.parse(await fs.readFile(path.join(task.outputDir,"checkpoint.json"),"utf8"));
+  validateCheckpoint(cp);
+  fail=false;m.continue(task.id);
+  await m.get(task.id).promise;
+  assert.equal(m.get(task.id).meta.status,"complete");
+  assert.equal(calls.filter(t=>t==="研究").length,1);
+  assert.equal(calls.filter(t=>t==="研究工具").length,1);
+  assert.equal(calls.filter(t=>t==="研究方法").length,2);
+  auditState(m.get(task.id).state);
 });
 test("complete run produces an audited export, never queries boundary nodes", async () => {
   const calls = [],

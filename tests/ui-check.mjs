@@ -19,7 +19,7 @@ const base = path.join(
 );
 const shots = process.env.SSM_SCREENSHOT_DIR || path.join(base, "screenshots");
 await fs.mkdir(shots, { recursive: true });
-let verification = true,
+let verification = true, resultFailure = false,
   instances = 0;
 const successes = [];
 const manager = new JobManager({
@@ -32,6 +32,11 @@ const manager = new JobManager({
         if (verification) {
           verification = false;
           throw new Error("平台要求验证：离线测试人工确认流程");
+        }
+        if (resultFailure) {
+          const error = new Error("等待联想结果超时：平台响应3002");
+          error.code = "RESULT_UNCONFIRMED";
+          throw error;
         }
         await new Promise((r) => setTimeout(r, 110));
         successes.push(term);
@@ -216,6 +221,19 @@ try {
     () => document.querySelector("#history-count").textContent === "2",
   );
   await page.locator("#close-trash").click();
+  const resultTask=await manager.create({seeds:['结果待确认界面验收'],depth:1});
+  resultFailure=true;
+  manager.start(resultTask.id);
+  await page.waitForFunction(()=>document.querySelector('#history-count').textContent==='3');
+  await page.getByRole('button',{name:'结果待确认界面验收 结果待确认',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#task-status').textContent==='结果待确认');
+  assert.equal(await page.locator('#manual-title').innerText(),'部分关键词的联想结果待确认');
+  assert.equal(await page.locator('#continue-btn').innerText(),'重试未确认词');
+  assert.equal(await page.locator('#manual-title').innerText().then(text=>text.includes('登录')||text.includes('验证')),false);
+  await page.screenshot({path:path.join(shots,'unconfirmed-result.png'),fullPage:true});
+  resultFailure=false;
+  await page.locator('#continue-btn').click();
+  await page.waitForFunction(()=>document.querySelector('#task-status').textContent==='已完成');
   assert.deepEqual(errors, []);
   const report = {
     passed: true,
@@ -225,6 +243,7 @@ try {
     editPausePreservesProgress: true,
     editCancelAndReload: true,
     noQueryCountLimit: true,
+    resultTimeoutNotCaptcha: true,
     successfulQueries: successes.length,
     duplicateSuccessfulQueries: 0,
     downloadZip: true,

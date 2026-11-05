@@ -533,6 +533,7 @@ input::-webkit-inner-spin-button {
 }
 .status.paused,
 .status.awaiting_verification,
+.status.awaiting_result,
 .status.awaiting_browser {
   background: #fff3df;
   color: #a16b21;

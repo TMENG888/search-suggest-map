@@ -9,12 +9,14 @@ const labels = {
   error: "需处理",
   awaiting_verification: "等待验证",
   awaiting_browser: "等待处理",
+  awaiting_result: "结果待确认",
 };
 const nodeLabels = {
   pending: "待查询",
   querying: "查询中",
   done: "已查询",
   depth_boundary: "已到指定层数",
+  unconfirmed: "结果待确认",
 };
 const platformName = (p) =>
   p === "douyin" ? "抖音" : p === "both" ? "双平台" : "小红书";
@@ -319,15 +321,17 @@ function render() {
     $("#zip-btn").setAttribute("download", "");
   }
   const waiting =
-    j && ["awaiting_verification", "awaiting_browser"].includes(j.status);
+    j && ["awaiting_verification", "awaiting_browser", "awaiting_result"].includes(j.status);
   $("#manual-banner").hidden = !waiting;
   if (waiting) {
     $("#manual-title").textContent =
       j.status === "awaiting_verification"
         ? "请在浏览器完成验证"
-        : "请查看平台浏览器提示";
+        : j.status === "awaiting_result" ? "部分关键词的联想结果待确认" : "请查看平台浏览器提示";
     $("#manual-message").textContent =
+      j.status === "awaiting_result" ? j.message + "。未检测到验证码或强制登录，未将这些词记为零结果。" :
       j.message + "。保留当前窗口，手动处理后点击继续。";
+    $("#continue-btn").textContent = j.status === "awaiting_result" ? "重试未确认词" : "已处理，继续";
   }
   const notice =
     j && ["paused", "error", "complete", "pausing"].includes(j.status);
@@ -588,6 +592,7 @@ function renderDetails() {
         nodeLabels[n.status],
     ),
   );
+  if (n.error) box.append(el("p", "detail-note", n.error));
   const by = new Map(j.nodes.map((n) => [n.id, n]));
   for (const [title, edges, key] of [
     ["来自这些词", j.edges.filter((e) => e.to === n.id), "from"],
@@ -606,6 +611,8 @@ function renderDetails() {
               ? "已到本次指定层数，无需继续查询"
               : n.status === "done"
                 ? "平台明确返回空建议"
+                : n.status === "unconfirmed"
+                  ? "平台未返回可确认结果，已保留待重试"
                 : "尚未查询",
         ),
       );

@@ -106,6 +106,7 @@ export function applyObservation(state, node, observation) {
   });
   node.status = "done";
   delete node.error;
+  delete node.errorCode;
   state.updated = now();
 }
 export function stats(state) {
@@ -114,8 +115,9 @@ export function stats(state) {
     relations: state.edges.length,
     completedQueries: state.nodes.filter((n) => n.status === "done").length,
     pendingQueries: state.nodes.filter((n) =>
-      ["pending", "querying"].includes(n.status),
+      ["pending", "querying", "unconfirmed"].includes(n.status),
     ).length,
+    unconfirmedQueries: state.nodes.filter(n => n.status === "unconfirmed").length,
     depthBoundary: state.nodes.filter((n) => n.status === "depth_boundary")
       .length,
   };
@@ -127,13 +129,15 @@ export async function crawl(
     checkpoint,
     stopping = () => false,
     onProgress = () => {},
+    onUnconfirmed = () => {},
   } = {},
 ) {
   for (const n of state.nodes)
-    if (n.status === "querying") n.status = "pending";
+    if (["querying", "unconfirmed"].includes(n.status)) n.status = "pending";
   state.status = "running";
   state.stopReason = null;
   let commits = Promise.resolve(), halted = false, failure = null;
+  const resultFailures = [];
   const fail = (error) => {
     halted = true;
     failure ||= String(error.message).slice(0, 1000);
@@ -162,12 +166,17 @@ export async function crawl(
         let observation;
         try { observation = await provider.get(platform, node.term); }
         catch (error) {
-          fail(error);
+          const deferred = error.code === "RESULT_UNCONFIRMED";
+          if (!deferred) fail(error);
           await commit(async () => {
-            node.status = "pending";
+            node.status = deferred ? "unconfirmed" : "pending";
             node.error = String(error.message).slice(0, 1000);
+            node.errorCode = error.code || null;
+            if (deferred) resultFailures.push(node);
             if (checkpoint) await save(checkpoint, state);
+            if (deferred) await onUnconfirmed(node,stats(state));
           });
+          if (deferred) continue;
           return;
         }
         await commit(async () => {
@@ -186,8 +195,9 @@ export async function crawl(
   await commits;
   for (const node of state.nodes)
     if (node.status === "querying") node.status = "pending";
-  state.status = failure || state.nodes.some(n => n.status === "pending") ? "paused" : "complete";
-  state.stopReason = state.status === "complete" ? null : failure || "用户停止";
+  state.status = failure || state.nodes.some(n => ["pending","unconfirmed"].includes(n.status)) ? "paused" : "complete";
+  state.stopReason = state.status === "complete" ? null : failure || (stopping() ? "用户停止" :
+    resultFailures.length ? "部分联想结果未确认：" + resultFailures.length + "个词已保留待重试，其余可查询词已处理。最近原因：" + resultFailures.at(-1).error : "用户停止");
   state.updated = now();
   if (checkpoint) await save(checkpoint, state);
   return state;
