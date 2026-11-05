@@ -9,7 +9,7 @@ const labels = {
   error: "需处理",
   awaiting_verification: "等待验证",
   awaiting_browser: "等待处理",
-  awaiting_result: "结果待确认",
+  partial: "已结束（有未确认词）",
 };
 const nodeLabels = {
   pending: "待查询",
@@ -257,11 +257,11 @@ function render() {
       pause.onclick = () =>
         action(pause, () => api("/api/jobs/" + item.id + "/pause", {}));
       controls.append(pause);
-    } else if (["paused", "ready", "error"].includes(item.status)) {
+    } else if (["paused", "ready", "error", "partial"].includes(item.status)) {
       const resume = el(
         "button",
         "history-control",
-        item.status === "ready" ? "开始" : "继续",
+        item.status === "ready" ? "开始" : item.status === "partial" ? "重试未确认词" : "继续",
       );
       resume.setAttribute(
         "aria-label",
@@ -301,13 +301,13 @@ function render() {
       dateTime(j.created) + (j.options.platform === "both" ? " · 双平台并发" : "") + " · 无查询次数限制"
     : "输入起始词，让搜索联想逐层生长。";
   $("#resume-btn").hidden =
-    !j || !["ready", "paused", "error"].includes(j.status);
+    !j || !["ready", "paused", "error", "partial"].includes(j.status);
   $("#resume-btn").disabled = busy;
   $("#edit-btn").hidden = !j;
   $("#edit-btn").disabled = !j || ui.active === j.id || j.deleting || j.editing || !ui.capabilities.editTask;
   $("#edit-btn").title = j && ui.active === j.id ? "请先暂停采集，再编辑设置" : "编辑层数与查询间隔";
   $("#resume-btn").textContent =
-    j?.status === "ready" ? "开始此任务" : "继续采集";
+    j?.status === "ready" ? "开始此任务" : j?.status === "partial" ? "重试未确认词" : "继续采集";
   $("#pause-btn").hidden = !j || ui.active !== j.id;
   $("#pause-btn").disabled = j?.status === "pausing";
   $("#pause-btn").textContent =
@@ -321,20 +321,19 @@ function render() {
     $("#zip-btn").setAttribute("download", "");
   }
   const waiting =
-    j && ["awaiting_verification", "awaiting_browser", "awaiting_result"].includes(j.status);
+    j && ["awaiting_verification", "awaiting_browser"].includes(j.status);
   $("#manual-banner").hidden = !waiting;
   if (waiting) {
     $("#manual-title").textContent =
       j.status === "awaiting_verification"
         ? "请在浏览器完成验证"
-        : j.status === "awaiting_result" ? "部分关键词的联想结果待确认" : "请查看平台浏览器提示";
+        : "请查看平台浏览器提示";
     $("#manual-message").textContent =
-      j.status === "awaiting_result" ? j.message + "。未检测到验证码或强制登录，未将这些词记为零结果。" :
       j.message + "。保留当前窗口，手动处理后点击继续。";
-    $("#continue-btn").textContent = j.status === "awaiting_result" ? "重试未确认词" : "已处理，继续";
+    $("#continue-btn").textContent = "已处理，继续";
   }
   const notice =
-    j && ["paused", "error", "complete", "pausing"].includes(j.status);
+    j && ["paused", "error", "complete", "pausing", "partial"].includes(j.status);
   $("#notice").hidden = !notice;
   $("#notice").textContent = notice ? j.message : "";
   $("#notice").className = "notice" + (j?.status === "error" ? " error" : "");
@@ -345,6 +344,9 @@ function render() {
     ["pending", "pendingQueries"],
   ])
     $("#stat-" + id).textContent = j ? Number(j[key]).toLocaleString() : "—";
+  $("#stat-empty-note").textContent = j ? "无衍生词：" + (j.emptyQueries || 0) : "";
+  $("#stat-unconfirmed-note").textContent = j?.unconfirmedQueries ?
+    "未确认：" + j.unconfirmedQueries + "（已跳过）" : "";
   const depth = $("#depth-summary");
   depth.replaceChildren();
   if (j) {

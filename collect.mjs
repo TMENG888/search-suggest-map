@@ -260,7 +260,7 @@ async function main() {
       2,
     ),
   );
-  if (state.status === "paused") process.exitCode = 2;
+  if (["paused", "partial"].includes(state.status)) process.exitCode = 2;
 }
 if (
   process.argv[1] &&

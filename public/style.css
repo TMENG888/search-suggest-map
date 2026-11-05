@@ -533,7 +533,7 @@ input::-webkit-inner-spin-button {
 }
 .status.paused,
 .status.awaiting_verification,
-.status.awaiting_result,
+.status.partial,
 .status.awaiting_browser {
   background: #fff3df;
   color: #a16b21;
@@ -578,6 +578,13 @@ input::-webkit-inner-spin-button {
   font-weight: 600;
   font-variant-numeric: tabular-nums;
   line-height: 1;
+}
+.summary-strip .summary-note {
+  display: block;
+  margin-top: 7px;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--muted);
 }
 .summary-strip .depth-summary {
   flex: 1.5;

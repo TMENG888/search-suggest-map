@@ -72,33 +72,82 @@ test("unconfirmed dropdown text never implies a CAPTCHA or login",()=>{
   assert.equal(pauseKind("普通保存失败，错误文本提到了验证"),null);
 });
 
-test("unconfirmed words are deferred while remaining words finish, then use a result gate and retry only failures",async()=>{
-  let fail=true,attempts=0;
+test("unconfirmed words finish without a gate, release the browser, and can be retried without repeating successes",async()=>{
+  let fail=true,attempts=0,closed=0;
   const calls=[];
   const m=await manager("deferred-results",()=>({get:async(platform,term)=>{
     calls.push(term);
     if(term==="研究方法"&&fail){attempts++;const error=new Error("等待联想结果超时：平台响应3002");error.code="RESULT_UNCONFIRMED";throw error;}
     return observe(term);
-  },close:async()=>{}}));
+  },close:async()=>{closed++;}}));
   const task=await m.create({seeds:["研究"],depth:2});
   m.start(task.id);
-  await until(()=>m.get(task.id).gate);
+  await m.get(task.id).promise;
   const result=m.snapshot(m.get(task.id));
-  assert.equal(result.status,"awaiting_result");
+  assert.equal(result.status,"partial");
   assert.equal(result.completedQueries,2);
   assert.equal(result.unconfirmedQueries,1);
-  assert.equal(result.pendingQueries,1);
+  assert.equal(result.pendingQueries,0);
+  assert.equal(m.active,null);
+  assert.equal(m.get(task.id).gate,null);
+  assert.equal(closed,1);
+  await assert.rejects(fs.stat(path.join(task.outputDir,"run.lock")),{code:"ENOENT"});
+  await assert.rejects(fs.stat(path.join(task.outputDir,"完整性核验.json")),{code:"ENOENT"});
   assert.equal(attempts,1);
   assert(calls.includes("研究工具"));
   const cp=JSON.parse(await fs.readFile(path.join(task.outputDir,"checkpoint.json"),"utf8"));
   validateCheckpoint(cp);
-  fail=false;m.continue(task.id);
+  assert.equal(cp.status,"partial");
+  assert.equal(cp.observations.some(o=>o.query==="研究方法"),false,"unconfirmed is not a successful empty observation");
+  assert.throws(()=>auditState(cp));
+  const reload=new JobManager({dataDir:m.dataDir,workDir:m.workDir});
+  await reload.init();
+  assert.equal(reload.get(task.id).meta.status,"partial");
+  const imported=await reload.import(cp);
+  assert.equal(imported.status,"partial");
+  const other=await m.create({seeds:["其他任务"],depth:1});
+  m.start(other.id);await m.get(other.id).promise;
+  assert.equal(m.get(other.id).meta.status,"complete","unconfirmed task must not block a different task");
+  fail=false;m.start(task.id);
   await m.get(task.id).promise;
   assert.equal(m.get(task.id).meta.status,"complete");
   assert.equal(calls.filter(t=>t==="研究").length,1);
   assert.equal(calls.filter(t=>t==="研究工具").length,1);
   assert.equal(calls.filter(t=>t==="研究方法").length,2);
   auditState(m.get(task.id).state);
+});
+test("confirmed empty branches on both platforms finish once and do not block sibling words",async()=>{
+  const calls=[];
+  const m=await manager("empty-branches",()=>({get:async(platform,term)=>{
+    calls.push(platform+":"+term);
+    return {source:"browser_autocomplete_response",suggestions:term==="根词"?["空分支","有子词分支"]:term==="有子词分支"?["叶词"]:[]};
+  },close:async()=>{}}));
+  const task=await m.create({seeds:["根词"],platform:"both",depth:3});
+  m.start(task.id);await m.get(task.id).promise;
+  const result=m.snapshot(m.get(task.id));
+  assert.equal(result.status,"complete");
+  assert.equal(result.emptyQueries,4);
+  assert.equal(result.pendingQueries,0);
+  assert.equal(result.unconfirmedQueries,0);
+  assert.equal(calls.length,8);
+  assert.equal(new Set(calls).size,8);
+  auditState(m.get(task.id).state);
+});
+test("legacy result waits migrate to a finished state without issuing more queries",async()=>{
+  const m=await manager("migrate-result-wait");
+  const task=await m.create({seeds:["无响应词"],depth:1});
+  const j=m.get(task.id);
+  j.state.nodes[0].status="unconfirmed";
+  j.state.status="paused";j.meta.status="awaiting_result";
+  await m.persist(j);
+  const reload=new JobManager({dataDir:m.dataDir,workDir:m.workDir,providerFactory:()=>{throw new Error("migration must not query");}});
+  await reload.init();
+  assert.equal(reload.get(task.id).meta.status,"partial");
+  assert.equal(reload.active,null);
+  assert.equal(reload.snapshot(reload.get(task.id)).pendingQueries,0);
+  const exported=JSON.parse(await fs.readFile(path.join(task.outputDir,"results.json"),"utf8"));
+  assert.equal(exported.status,"partial");
+  assert.equal(exported.observations.length,0);
 });
 test("complete run produces an audited export, never queries boundary nodes", async () => {
   const calls = [],

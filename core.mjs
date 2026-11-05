@@ -115,9 +115,10 @@ export function stats(state) {
     relations: state.edges.length,
     completedQueries: state.nodes.filter((n) => n.status === "done").length,
     pendingQueries: state.nodes.filter((n) =>
-      ["pending", "querying", "unconfirmed"].includes(n.status),
+      ["pending", "querying"].includes(n.status),
     ).length,
     unconfirmedQueries: state.nodes.filter(n => n.status === "unconfirmed").length,
+    emptyQueries: state.observations.filter(o => o.suggestions.length === 0).length,
     depthBoundary: state.nodes.filter((n) => n.status === "depth_boundary")
       .length,
   };
@@ -137,7 +138,6 @@ export async function crawl(
   state.status = "running";
   state.stopReason = null;
   let commits = Promise.resolve(), halted = false, failure = null;
-  const resultFailures = [];
   const fail = (error) => {
     halted = true;
     failure ||= String(error.message).slice(0, 1000);
@@ -172,7 +172,6 @@ export async function crawl(
             node.status = deferred ? "unconfirmed" : "pending";
             node.error = String(error.message).slice(0, 1000);
             node.errorCode = error.code || null;
-            if (deferred) resultFailures.push(node);
             if (checkpoint) await save(checkpoint, state);
             if (deferred) await onUnconfirmed(node,stats(state));
           });
@@ -195,9 +194,12 @@ export async function crawl(
   await commits;
   for (const node of state.nodes)
     if (node.status === "querying") node.status = "pending";
-  state.status = failure || state.nodes.some(n => ["pending","unconfirmed"].includes(n.status)) ? "paused" : "complete";
-  state.stopReason = state.status === "complete" ? null : failure || (stopping() ? "用户停止" :
-    resultFailures.length ? "部分联想结果未确认：" + resultFailures.length + "个词已保留待重试，其余可查询词已处理。最近原因：" + resultFailures.at(-1).error : "用户停止");
+  const unconfirmed = state.nodes.filter(n => n.status === "unconfirmed");
+  state.status = failure || state.nodes.some(n => n.status === "pending") || stopping() ? "paused" :
+    unconfirmed.length ? "partial" : "complete";
+  state.stopReason = state.status === "complete" ? null : state.status === "partial" ?
+    "本轮采集已结束：" + unconfirmed.length + "个词未确认，已跳过；其余可查询词已处理，结果已保存。可按需重试未确认词。" :
+    failure || "用户停止";
   state.updated = now();
   if (checkpoint) await save(checkpoint, state);
   return state;
@@ -278,6 +280,10 @@ export async function exportAll(state, dir, htmlTemplate) {
       summary.completedQueries +
       "；待查询：" +
       summary.pendingQueries +
+      "；未确认：" +
+      summary.unconfirmedQueries +
+      "；确认无衍生词：" +
+      summary.emptyQueries +
       "。",
     "",
     "本图仅表示本次账号、时间和平台返回的搜索联想词，不是全平台所有长尾词，也不代表搜索量或热度。",

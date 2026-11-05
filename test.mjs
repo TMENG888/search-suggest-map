@@ -343,13 +343,14 @@ test("slow dropdowns receive one bounded UI recovery; confirmed empty and failed
       },1400)})</script>`);
     const slow=await p.get("xiaohongshu","慢词");
     assert.deepEqual(slow.suggestions,["慢词的真实衍生"]);
-    let failedRequests=0;
+    let failedRequests=0,emptyRequests=0;
     await page.route('https://www.xiaohongshu.com/**',async route=>{
       if(new URL(route.request().url()).pathname==='/explore')return route.fulfill({contentType:'text/html',body:`<input id="search-input"><script>
         document.querySelector('input').addEventListener('input',e=>fetch('/api/sns/web/v1/search/recommend?keyword='+encodeURIComponent(e.target.value)).then(r=>r.json()))
         </script>`});
       const query=new URL(route.request().url()).searchParams.get('keyword');
       if(query==='空词')failedRequests++;
+      if(query==='无候选')emptyRequests++;
       return route.fulfill({contentType:'application/json',body:JSON.stringify(query==='空词'
         ?{code:3002,success:false,msg:'方案执行结果为NULL',data:null}
         :{code:1000,success:true,data:{sug_items:[]}})});
@@ -359,6 +360,7 @@ test("slow dropdowns receive one bounded UI recovery; confirmed empty and failed
     const empty=await p.get('xiaohongshu','无候选');
     assert.equal(empty.source,'browser_autocomplete_response');
     assert.deepEqual(empty.suggestions,[]);
+    assert.equal(emptyRequests,1,"confirmed empty suggestions must not require a recovery or any nonempty child");
     await assert.rejects(p.get('xiaohongshu','空词'),error=>error.code==='RESULT_UNCONFIRMED'&&/3002/.test(error.message));
     assert.equal(failedRequests,2,"only initial attempt plus one recovery");
     const diagnostic=JSON.parse(await fs.readFile(path.join(TEMP,'wait-recovery/diagnostics/xiaohongshu-latest.json'),'utf8'));

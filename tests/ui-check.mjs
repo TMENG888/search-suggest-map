@@ -225,14 +225,20 @@ try {
   resultFailure=true;
   manager.start(resultTask.id);
   await page.waitForFunction(()=>document.querySelector('#history-count').textContent==='3');
-  await page.getByRole('button',{name:'结果待确认界面验收 结果待确认',exact:true}).click();
-  await page.waitForFunction(()=>document.querySelector('#task-status').textContent==='结果待确认');
-  assert.equal(await page.locator('#manual-title').innerText(),'部分关键词的联想结果待确认');
-  assert.equal(await page.locator('#continue-btn').innerText(),'重试未确认词');
-  assert.equal(await page.locator('#manual-title').innerText().then(text=>text.includes('登录')||text.includes('验证')),false);
+  await page.getByRole('button',{name:'结果待确认界面验收 已结束（有未确认词）',exact:true}).click();
+  await page.waitForFunction(()=>document.querySelector('#task-status').textContent==='已结束（有未确认词）');
+  assert.equal(await page.locator('#manual-banner').isVisible(),false);
+  assert.equal(await page.locator('#stat-pending').innerText(),'0');
+  assert.equal(await page.locator('#stat-unconfirmed-note').innerText(),'未确认：1（已跳过）');
+  assert.equal(await page.locator('#resume-btn').innerText(),'重试未确认词');
+  assert.equal(await page.locator('#start-btn').isEnabled(),true);
+  assert.equal(await page.locator('#zip-btn').isVisible(),true);
+  await page.setViewportSize({width:390,height:900});
+  assert.equal(await page.evaluate(()=>document.documentElement.scrollWidth>innerWidth),false);
+  await page.setViewportSize({width:1500,height:1000});
   await page.screenshot({path:path.join(shots,'unconfirmed-result.png'),fullPage:true});
   resultFailure=false;
-  await page.locator('#continue-btn').click();
+  await page.locator('#resume-btn').click();
   await page.waitForFunction(()=>document.querySelector('#task-status').textContent==='已完成');
   assert.deepEqual(errors, []);
   const report = {
@@ -244,6 +250,7 @@ try {
     editCancelAndReload: true,
     noQueryCountLimit: true,
     resultTimeoutNotCaptcha: true,
+    unconfirmedAutoFinishAndRelease: true,
     successfulQueries: successes.length,
     duplicateSuccessfulQueries: 0,
     downloadZip: true,

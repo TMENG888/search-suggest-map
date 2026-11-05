@@ -26,7 +26,7 @@ export const EXPORTS = new Set([
   "checkpoint.json",
   "完整性核验.json",
 ]);
-const idleStatuses = new Set(["ready", "paused", "error"]);
+const idleStatuses = new Set(["ready", "paused", "error", "partial"]);
 export function pauseKind(reason) {
   // Match explicit error categories, never the word 验证 inside 可验证下拉词.
   if (/^平台要求验证(?:[：:]|$)/.test(reason)) return "verification";
@@ -246,7 +246,14 @@ export class JobManager extends EventEmitter {
           meta.message = "查询次数限制已移除，可继续遍历至第" + meta.options.depth + "层。";
           state.stopReason = meta.message;
         }
-        if (!["complete", "paused", "ready", "error"].includes(meta.status)) {
+        const legacyResultWait = meta.status === "awaiting_result" &&
+          !state.nodes.some(n => ["pending", "querying"].includes(n.status)) &&
+          state.nodes.some(n => n.status === "unconfirmed");
+        if (legacyResultWait) {
+          meta.status = state.status = "partial";
+          meta.message = state.stopReason = "本轮采集已结束，未确认词已保留，可按需重试；无需继续等待。";
+        }
+        if (!["complete", "paused", "ready", "error", "partial"].includes(meta.status)) {
           meta.status = "paused";
           meta.message = "上次服务已停止，可从断点继续。";
           state.status = "paused";
@@ -263,7 +270,7 @@ export class JobManager extends EventEmitter {
         };
         this.jobs.set(name, job);
         await this.persist(job);
-        if (hadLegacyCap) await exportAll(state, dir, mindmapHTML);
+        if (hadLegacyCap || legacyResultWait) await exportAll(state, dir, mindmapHTML);
       } catch (error) {
         this.emit("warning", {
           message: "跳过损坏或仍被占用的任务：" + name + " " + error.message,
@@ -486,7 +493,7 @@ export class JobManager extends EventEmitter {
     await fs.unlink(path.join(target, "deleted.json")).catch(() => {});
     for (const n of state.nodes)
       if (n.status === "querying") n.status = "pending";
-    if (!["complete", "ready", "paused", "error"].includes(meta.status)) {
+    if (!["complete", "ready", "paused", "error", "partial"].includes(meta.status)) {
       meta.status = "paused";
       state.status = "paused";
     }
@@ -573,7 +580,7 @@ export class JobManager extends EventEmitter {
     if (state.status === "complete") audit = auditState(state);
     for (const n of state.nodes)
       if (n.status === "querying") n.status = "pending";
-    if (!audit) {
+    if (!audit && state.status !== "partial") {
       state.status = "paused";
       state.stopReason = "导入断点，可继续采集";
     }
@@ -582,8 +589,8 @@ export class JobManager extends EventEmitter {
       meta = {
         id,
         created: now(),
-        status: audit ? "complete" : "paused",
-        message: audit ? "已导入，完整性检查通过" : "已导入断点",
+        status: audit ? "complete" : state.status === "partial" ? "partial" : "paused",
+        message: audit ? "已导入，完整性检查通过" : state.status === "partial" ? state.stopReason : "已导入断点",
         options,
         outputDir: dir,
         audit,
@@ -612,7 +619,7 @@ export class JobManager extends EventEmitter {
   async update(id, patch) {
     const j = this.get(id);
     if (this.closing || this.active === id || j.deleting || j.editing ||
-        !["ready", "paused", "error", "complete"].includes(j.meta.status))
+        !["ready", "paused", "error", "complete", "partial"].includes(j.meta.status))
       throw Object.assign(new Error("请先暂停任务，等待保存完成后再编辑。"), { statusCode: 409 });
     if (!patch || typeof patch !== "object" || Array.isArray(patch) ||
         Object.keys(patch).some(key => !["seeds", "platform", "depth", "delayMs"].includes(key)))
@@ -653,7 +660,7 @@ export class JobManager extends EventEmitter {
         });
       }
       j.meta.options = options;
-      if (j.meta.status !== "complete") {
+      if (j.meta.status !== "complete" && j.meta.status !== "partial") {
         j.meta.message = "采集设置已保存，继续后遍历至第" + options.depth + "层，无查询次数限制。";
         j.state.stopReason = j.meta.message;
       }
@@ -747,12 +754,21 @@ export class JobManager extends EventEmitter {
           j.meta.message = "指定深度遍历完成，完整性检查通过";
           break;
         }
+        if (j.state.status === "partial") {
+          j.meta.status = "partial";
+          j.meta.message = j.state.stopReason;
+          delete j.meta.audit;
+          await fs.unlink(path.join(j.dir, "完整性核验.json")).catch(error => {
+            if (error.code !== "ENOENT") throw error;
+          });
+          this.notify(j, j.meta.message);
+          break;
+        }
         if (j.stop) break;
         const reason = j.state.stopReason || "采集已暂停";
         const kind = pauseKind(reason);
-        if (kind) {
-          j.meta.status = kind === "verification" ? "awaiting_verification" :
-            kind === "result" ? "awaiting_result" : "awaiting_browser";
+        if (kind && kind !== "result") {
+          j.meta.status = kind === "verification" ? "awaiting_verification" : "awaiting_browser";
           j.meta.message = kind === "login"
             ? "登录提示仍挡住搜索框。请在平台窗口关闭提示，或按平台要求登录"
             : reason;
@@ -763,8 +779,7 @@ export class JobManager extends EventEmitter {
           });
           await this.persist(j);
           await exportAll(j.state, j.dir, mindmapHTML);
-          this.notify(j, kind === "result" ? "未确认的词和窗口均已保留，可点击「重试未确认词」；没有检测到验证码或强制登录" :
-            "请在浏览器处理平台提示，完成后点击「已处理，继续」");
+          this.notify(j, "请在浏览器处理平台提示，完成后点击「已处理，继续」");
           const proceed = await wait;
           j.gate = null;
           if (!proceed || j.stop) break;
@@ -827,7 +842,7 @@ export class JobManager extends EventEmitter {
     const j = this.get(id);
     if (
       !j.gate ||
-      !["awaiting_verification", "awaiting_browser", "awaiting_result"].includes(j.meta.status)
+      !["awaiting_verification", "awaiting_browser"].includes(j.meta.status)
     )
       throw Object.assign(new Error("当前没有等待人工处理的任务。"), {
         statusCode: 409,

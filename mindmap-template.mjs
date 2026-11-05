@@ -9,7 +9,7 @@ const S=JSON.parse(document.querySelector('#data').textContent),NS='http://www.w
 for(const n of S.nodes)if(n.parent){if(!kids.has(n.parent))kids.set(n.parent,[]);kids.get(n.parent).push(n)}
 const roots=S.nodes.filter(n=>!n.parent),fold=new Set(),scene=document.querySelector('#scene'),svg=document.querySelector('#canvas'),viewport=document.querySelector('#viewport');let positions=new Map(),scale=1,tx=20,ty=30,search='';
 if(S.nodes.length>150)for(const n of S.nodes)if(n.depth>=1&&kids.has(n.id))fold.add(n.id);
-document.querySelector('#meta').textContent='起始词：'+S.config.seeds.join('、')+' · 最大深度 '+S.config.depth+' · '+S.nodes.length+' 个去重词 / '+S.edges.length+' 条关系 · '+(S.status==='complete'?'指定深度遍历完成':'未完成：'+(S.stopReason||S.status));
+document.querySelector('#meta').textContent='起始词：'+S.config.seeds.join('、')+' · 最大深度 '+S.config.depth+' · '+S.nodes.length+' 个去重词 / '+S.edges.length+' 条关系 · '+(S.status==='complete'?'指定深度遍历完成':S.status==='partial'?(S.stopReason||'本轮已结束，有未确认词'):'未完成：'+(S.stopReason||S.status));
 function el(tag,attrs={},text){const e=document.createElementNS(NS,tag);for(const [k,v]of Object.entries(attrs))e.setAttribute(k,v);if(text!==undefined)e.textContent=text;return e}
 function transform(){scene.setAttribute('transform','translate('+tx+','+ty+') scale('+scale+')')}
 function draw(){scene.replaceChildren();positions=new Map();let row=0;
